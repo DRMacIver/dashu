@@ -59,6 +59,18 @@ pub fn add_word_in_place(words: &mut [Word], rhs: Word) -> bool {
 /// Returns overflow.
 #[inline]
 pub fn add_dword_in_place(words: &mut [Word], rhs: DoubleWord) -> bool {
+    // Tell LLVM the length is at least 2 so split_first_mut's `Option::None`
+    // branches can be removed. This matches the documented precondition;
+    // callers must ensure `words.len() >= 2` (all in-tree callers do, and
+    // there's a debug_assert above in the wrappers that go through
+    // `add_large_dword`).
+    debug_assert!(words.len() >= 2);
+    if words.len() < 2 {
+        // SAFETY: contract above. In release, this is an unreachable hint
+        // that lets LLVM elide the `Option::None` arms of the two
+        // `split_first_mut` calls below.
+        unsafe { core::hint::unreachable_unchecked() }
+    }
     let (word_0, words_hi) = words.split_first_mut().unwrap();
     let (word_1, words_hi) = words_hi.split_first_mut().unwrap();
     let (b0, b1) = split_dword(rhs);
@@ -86,6 +98,11 @@ pub fn sub_word_in_place(words: &mut [Word], rhs: Word) -> bool {
 #[must_use]
 #[inline]
 pub fn sub_dword_in_place(words: &mut [Word], rhs: DoubleWord) -> bool {
+    debug_assert!(words.len() >= 2);
+    if words.len() < 2 {
+        // SAFETY: see add_dword_in_place.
+        unsafe { core::hint::unreachable_unchecked() }
+    }
     let (word_0, words_hi) = words.split_first_mut().unwrap();
     let (word_1, words_hi) = words_hi.split_first_mut().unwrap();
     let (b0, b1) = split_dword(rhs);
