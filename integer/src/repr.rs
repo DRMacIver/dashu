@@ -684,7 +684,13 @@ impl PartialEq for Repr {
         // SAFETY: capacity tells us which union variant is live.
         unsafe {
             if inline_a {
-                self.data.inline == other.data.inline
+                // Compare as a single DoubleWord rather than [Word; 2] —
+                // these compile to the same hardware comparison but LLVM
+                // emits tighter code (and no spurious memcmp call) when the
+                // operands are scalar u128s.
+                let dw_a = double_word(self.data.inline[0], self.data.inline[1]);
+                let dw_b = double_word(other.data.inline[0], other.data.inline[1]);
+                dw_a == dw_b
             } else {
                 let len_a = self.data.heap.1;
                 let len_b = other.data.heap.1;
