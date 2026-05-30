@@ -51,6 +51,8 @@ workload improved):
 | `8359d48`  | `#[inline]` on `cmp::cmp_in_place`                                           | -47 %                       |
 | `b5547c5`  | `#[inline]` on inner add/sub kernels (`*_in_place`)                          | -50 %                       |
 | `396464a`  | `#[inline]` on shift kernel + Mul dispatch `#[inline(always)]`               | -50 %                       |
+| `683cec9`  | `core::hint::unreachable_unchecked` on dword-kernel len precondition          | (asm: -3 instructions / call site, bench within noise) |
+| `563470f`  | aarch64-specific `add_with_carry` / `sub_with_borrow` via inline asm          | (asm: structurally cleaner single-word chain; net for sum-small dword chain unchanged) |
 
 The recurring pattern: a tiny `pub fn` body whose call boundary
 prevented LLVM from folding the surrounding loop. The Drop and
@@ -67,6 +69,20 @@ trim/shrink work.
 | 2 | Collapse the dispatch chain                                      | **Done** |
 | 3 | Borrowed-Add fused alloc-and-fill                                | **Partial / ruled out** — see [rec2/rec3 notes](./2026-05-30-rec2-rec3-results.md). The cheap part (`Buffer::from #[inline(always)]`) landed; the fused-write rewrite was not pursued because the remaining cost is the inherent word-level data movement, and a real caller can already side-step it via `+=` (which Rec 1 has optimised). |
 | 4 | Faster large multiplication (FFT, Toom-3 tuning, …)              | **Ruled out** for this pass. Multi-week project, orthogonal to the hegel-rust small-int goal. The `fft` module already exists in scaffolded form; a future investigation can pick it up. |
+
+## New opportunities found and pursued in this pass
+
+- **`core::hint::unreachable_unchecked` on dword-kernel length
+  preconditions** (`683cec9`). Removed three predicted-not-taken
+  branch instructions from the entry of `add_dword_in_place` /
+  `sub_dword_in_place`. Bench impact was within noise but the asm
+  reduction is concrete.
+- **aarch64-specific `add_with_carry` / `sub_with_borrow`** via
+  inline asm (`563470f`). Mirrors x86_64's `_addcarry_u64`-based impl.
+  LLVM was already producing optimal carry chains for the 2-word
+  DoubleWord case, so no measurable bench win there, but the path is
+  set up for any future call shape where the generic impl falls
+  short.
 
 ## New opportunities found and noted (not pursued in this pass)
 
@@ -97,6 +113,14 @@ Listed in
   the safe version is to add a hand-rolled non-macro `Add` impl just
   for the heap-LHS + inline-RHS case, but the win is modest and the
   code-size cost concrete.
+- **Specialised `len == 3` fast path** in `add_large_dword`. The
+  user-suggested experiment; full write-up in
+  [`2026-05-30-len3-specialisation.md`](./2026-05-30-len3-specialisation.md).
+  84 % of `sum-small` heap-add iterations are at `len == 3`, but the
+  current generic code already compiles to the same instruction count
+  on aarch64 thanks to LLVM's adcs chaining, so a hand-rolled
+  specialisation produced no win (and a modest net regression from
+  branch overhead + duplicated post-add tail).
 
 ## Final flat profiles
 
@@ -133,6 +157,15 @@ The `_platform_memmove` is the result-buffer memcpy on by-ref Add
 of heap-resident operands. The kernels (add, mul, sub) are doing
 necessary arithmetic. There is no remaining easily-removed function-call
 overhead in this profile.
+
+## On reading these numbers
+
+Bench timings reported here are best-of from quiet-machine runs against
+the `pre-opt` baseline. The user has flagged the test machine has had
+intermittent unrelated load during this work; sub-percent differences
+should be treated as noise. The asm-level changes (bounds-check elision,
+aarch64 carry chain) are noted with the disassembly evidence rather than
+a bench delta, because the asm is independent of system load.
 
 ## Code-size impact
 
