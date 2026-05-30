@@ -104,3 +104,58 @@ pub fn mixed_class<R: Rng>(rng: &mut R) -> ValueClass {
 pub fn seeded_rng() -> StdRng {
     StdRng::seed_from_u64(0xDA5_4_BE_4)
 }
+
+// ---------------------------------------------------------------------------
+// Rug counterparts — only compiled for the `*_rug.rs` benches.
+//
+// Magnitudes are kept point-for-point identical to `sample_ubig` / `sample_ibig`
+// so the rug benches measure the same value-class regime as the dashu side.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "rug-bench")]
+#[allow(unused_imports)]
+pub use rug_side::*;
+
+#[cfg(feature = "rug-bench")]
+mod rug_side {
+    use super::{random_ubig, ValueClass};
+    use dashu_int::UBig;
+    use rand_v08::Rng;
+    use rug::Integer as RugInt;
+
+    /// Convert a `UBig` of any size to a `rug::Integer`. Goes via the byte
+    /// representation rather than the limb words because rug exposes
+    /// `Integer::from_digits` for that, and the conversion is one-off (used
+    /// only in bench setup, never in the timed loop).
+    pub fn ubig_to_rug(u: &UBig) -> RugInt {
+        let bytes = u.to_be_bytes();
+        RugInt::from_digits(&bytes, rug::integer::Order::Msf)
+    }
+
+    /// Build a non-negative `rug::Integer` whose magnitude matches
+    /// `sample_ubig` exactly for the given class.
+    pub fn sample_rug_uint<R: Rng>(class: ValueClass, rng: &mut R) -> RugInt {
+        match class {
+            ValueClass::Zero => RugInt::new(),
+            ValueClass::OneWord => RugInt::from(rng.gen::<u64>() | 1),
+            ValueClass::TwoWord => {
+                let lo: u64 = rng.gen();
+                let hi: u64 = rng.gen::<u64>() | (1u64 << 63);
+                (RugInt::from(hi) << 64) + lo
+            }
+            ValueClass::JustOverInline => ubig_to_rug(&random_ubig(192, rng)),
+            ValueClass::Mid => ubig_to_rug(&random_ubig(1024, rng)),
+            ValueClass::Large => ubig_to_rug(&random_ubig(100_000, rng)),
+        }
+    }
+
+    /// Same shape as `sample_rug_uint`, but sometimes negated.
+    pub fn sample_rug_int<R: Rng>(class: ValueClass, rng: &mut R) -> RugInt {
+        let mag = sample_rug_uint(class, rng);
+        if rng.gen::<bool>() {
+            -mag
+        } else {
+            mag
+        }
+    }
+}

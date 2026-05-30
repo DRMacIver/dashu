@@ -31,6 +31,11 @@ num-integer = ["num-integer_v01"]
 # can build seeded RNGs.
 hegel-tests = ["rand"]
 
+# Enables the comparison benches against `rug` (GNU GMP) — the `[*]_rug.rs`
+# bench targets. Requires libgmp / libmpfr / libmpc headers on the build host.
+# The standard dashu benches are unaffected and keep building without this.
+rug-bench = ["dep:rug", "rand"]
+
 [dependencies]
 dashu-base = { version = "0.4.0", default-features = false, path = "../base" }
 cfg-if = { version = "1.0.0" }
@@ -47,6 +52,10 @@ zeroize = { optional = true, version = "1.5.7", default-features = false }
 rand_v08 = { optional = true, version = "0.8.3", package = "rand", default-features = false }
 num-traits_v02 = { optional = true, version = "0.2.14", package = "num-traits", default-features = false }
 num-integer_v01 = { optional = true, version = "0.1.45", package = "num-integer", default-features = false }
+
+# Only used by the `*_rug.rs` comparison benches under the `rug-bench` feature.
+# Optional so the regular library build never pulls in the GMP toolchain.
+rug = { optional = true, version = "1.30" }
 
 [dev-dependencies]
 rand_v08 = { version = "0.8.3", package = "rand" }
@@ -103,4 +112,24 @@ harness = false
 [[bench]]
 name = "hegel_shrinker"
 required-features = ["rand"]
+harness = false
+
+[[bench]]
+name = "primitive_rug"
+required-features = ["rug-bench"]
+harness = false
+
+[[bench]]
+name = "small_int_rug"
+required-features = ["rug-bench"]
+harness = false
+
+[[bench]]
+name = "workload_rug"
+required-features = ["rug-bench"]
+harness = false
+
+[[bench]]
+name = "hegel_shrinker_rug"
+required-features = ["rug-bench"]
 harness = false
