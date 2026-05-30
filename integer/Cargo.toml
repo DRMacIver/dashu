@@ -25,6 +25,12 @@ rand = ["rand_v08"]
 num-traits = ["num-traits_v02"]
 num-integer = ["num-integer_v01"]
 
+# Enables the hegel-based stateful equivalence tests in tests/stateful_*.rs.
+# Required-features on those [[test]] entries below ensures `cargo test`
+# without this flag will not compile them. Also enables `rand` so the tests
+# can build seeded RNGs.
+hegel-tests = ["rand"]
+
 [dependencies]
 dashu-base = { version = "0.4.0", default-features = false, path = "../base" }
 cfg-if = { version = "1.0.0" }
@@ -50,6 +56,12 @@ serde_json = { version = "1.0" }
 
 criterion = { version = "0.5.1", features = ["html_reports"] }
 
+# Stateful equivalence tests against num-bigint. Gated behind the `hegel-tests`
+# feature so the default `cargo test` doesn't pull these in on toolchains that
+# can't compile hegeltest (it requires edition 2024 / rustc >= 1.86).
+hegeltest = { version = "0.14", features = ["native"] }
+num-bigint = "0.4"
+
 [lib]
 bench = false
 
@@ -65,7 +77,25 @@ required-features = ["serde"]
 name = "num_order"
 required-features = ["num-order"]
 
+[[test]]
+name = "stateful_ibig"
+required-features = ["hegel-tests"]
+
+[[test]]
+name = "stateful_ubig"
+required-features = ["hegel-tests"]
+
 [[bench]]
 name = "primitive"
+required-features = ["rand"]
+harness = false
+
+[[bench]]
+name = "small_int"
+required-features = ["rand"]
+harness = false
+
+[[bench]]
+name = "workload"
 required-features = ["rand"]
 harness = false
