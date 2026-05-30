@@ -197,25 +197,35 @@ fn running_sum_and_compare_under_1kbit(c: &mut Criterion) {
     });
 }
 
-/// Scripted arithmetic mix bounded to ≤ 256-bit inputs.
+/// Scripted arithmetic mix where every register stays bounded.
+///
+/// The earlier `bounded_arithmetic_mix*` benches grow `r2` unboundedly via
+/// `r2 = &r2 * v` (and `r3` via `r3 << 1`), so by the end of a single
+/// `b.iter` invocation `r2` is ~32 kbit — well outside the user's < 1 kbit
+/// target. Here every reassignment writes a result whose magnitude is
+/// bounded by `O(input_size)`: multiplication is between two fresh inputs
+/// (≤ 512 bits), shifts and bitwise ops can only grow by one bit per op,
+/// and the chained sums/diffs use freshly-drawn inputs as one operand. All
+/// four registers therefore stay under 1 kbit for the entire loop.
 fn bounded_arithmetic_mix_under_1kbit(c: &mut Criterion) {
     let inputs = build_under_1kbit_inputs();
     c.bench_function("bounded_arithmetic_mix_under_1kbit", |b| {
         b.iter(|| {
-            let mut r0 = IBig::from(0);
-            let mut r1 = IBig::from(1);
-            let mut r2 = IBig::from(-1);
-            let mut r3 = IBig::from(2);
+            let mut r0 = inputs[0].clone();
+            let mut r1 = inputs[1].clone();
+            let mut r2 = inputs[2].clone();
+            let mut r3 = inputs[3].clone();
             for (i, v) in inputs.iter().enumerate() {
+                let w = &inputs[i.wrapping_add(7) & (N - 1)];
                 match i & 7 {
-                    0 => r0 = &r0 + black_box(v),
-                    1 => r1 = &r1 - black_box(v),
-                    2 => r2 = &r2 * black_box(v),
-                    3 => r3 = &r3 + &r0,
-                    4 => r0 = &r0 ^ &r1,
-                    5 => r1 = &r2 & black_box(v),
-                    6 => r2 = &r3 << 1,
-                    _ => r3 = &r0 + &r2,
+                    0 => r0 = &r1 - black_box(v),
+                    1 => r1 = &r0 ^ &r2,
+                    2 => r2 = black_box(v) - &r3,
+                    3 => r3 = &r0 & black_box(v),
+                    4 => r0 = &r2 + black_box(v),
+                    5 => r1 = &r3 << 1,
+                    6 => r2 = black_box(v) * w,
+                    _ => r3 = &r1 - &r0,
                 }
             }
             (r0, r1, r2, r3)
