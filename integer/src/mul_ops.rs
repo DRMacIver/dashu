@@ -166,22 +166,46 @@ pub(crate) mod repr {
     #[inline]
     fn mul_dword(a: DoubleWord, b: DoubleWord) -> Repr {
         if a <= Word::MAX as DoubleWord && b <= Word::MAX as DoubleWord {
-            Repr::from_dword(a * b)
-        } else {
-            mul_dword_spilled(a, b)
+            // Both fit in Word; result fits in DoubleWord.
+            return Repr::from_dword(a * b);
         }
+        // At least one operand exceeds Word::MAX. The product still fits in
+        // a DoubleWord iff the *other* operand is 0 or 1; short-circuit those
+        // so we don't allocate a 4-word buffer just to collapse it back to
+        // inline via `Repr::from_buffer`'s `pop_zeros`. Hit by the common
+        // `±1 * 2^k` pattern (e.g. `biased_i128_sample`).
+        if a == 0 || b == 0 {
+            return Repr::zero();
+        }
+        if a == 1 {
+            return Repr::from_dword(b);
+        }
+        if b == 1 {
+            return Repr::from_dword(a);
+        }
+        mul_dword_spilled(a, b)
     }
 
     fn mul_dword_spilled(lhs: DoubleWord, rhs: DoubleWord) -> Repr {
         let (lo, hi) = math::mul_add_carry_dword(lhs, rhs, 0);
-        let mut buffer = Buffer::allocate(4);
+        if hi == 0 {
+            // E.g. lhs=2, rhs=2^65: only one operand is > Word::MAX but the
+            // product still fits in a DoubleWord. Avoid the heap allocation.
+            return Repr::from_dword(lo);
+        }
         let (n0, n1) = split_dword(lo);
+        let (n2, n3) = split_dword(hi);
+        // n3 == 0 ⇒ result is exactly 3 words; allocating 4 here would force
+        // `from_buffer`'s `pop_zeros`/`shrink_to_fit` to trim.
+        let len = if n3 != 0 { 4 } else { 3 };
+        let mut buffer = Buffer::allocate(len);
         buffer.push(n0);
         buffer.push(n1);
-        let (n2, n3) = split_dword(hi);
         buffer.push(n2);
-        buffer.push(n3);
-        Repr::from_buffer(buffer)
+        if n3 != 0 {
+            buffer.push(n3);
+        }
+        Repr::from_buffer_normalized(buffer)
     }
 
     /// Multiply a large number by a `DoubleWord`.
@@ -249,14 +273,19 @@ pub(crate) mod repr {
 
     fn square_dword_spilled(dw: DoubleWord) -> Repr {
         let (lo, hi) = math::mul_add_carry_dword(dw, dw, 0);
-        let mut buffer = Buffer::allocate(4);
+        // dw > Word::MAX so dw*dw > 2^128: at least 3 output words.
+        debug_assert!(hi != 0);
         let (n0, n1) = split_dword(lo);
+        let (n2, n3) = split_dword(hi);
+        let len = if n3 != 0 { 4 } else { 3 };
+        let mut buffer = Buffer::allocate(len);
         buffer.push(n0);
         buffer.push(n1);
-        let (n2, n3) = split_dword(hi);
         buffer.push(n2);
-        buffer.push(n3);
-        Repr::from_buffer(buffer)
+        if n3 != 0 {
+            buffer.push(n3);
+        }
+        Repr::from_buffer_normalized(buffer)
     }
 
     pub(crate) fn square_large(words: &[Word]) -> Repr {
