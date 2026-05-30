@@ -233,24 +233,27 @@ fn bounded_arithmetic_mix_under_1kbit(c: &mut Criterion) {
     });
 }
 
+/// Same shape as `bounded_arithmetic_mix_under_1kbit`, but inputs strictly
+/// inline (≤ 128 bits). Every register stays bounded for the same reasons.
 fn bounded_arithmetic_mix_small(c: &mut Criterion) {
     let inputs = build_small_inputs();
     c.bench_function("bounded_arithmetic_mix_small", |b| {
         b.iter(|| {
-            let mut r0 = IBig::from(0);
-            let mut r1 = IBig::from(1);
-            let mut r2 = IBig::from(-1);
-            let mut r3 = IBig::from(2);
+            let mut r0 = inputs[0].clone();
+            let mut r1 = inputs[1].clone();
+            let mut r2 = inputs[2].clone();
+            let mut r3 = inputs[3].clone();
             for (i, v) in inputs.iter().enumerate() {
+                let w = &inputs[i.wrapping_add(7) & (N - 1)];
                 match i & 7 {
-                    0 => r0 = &r0 + black_box(v),
-                    1 => r1 = &r1 - black_box(v),
-                    2 => r2 = &r2 * black_box(v),
-                    3 => r3 = &r3 + &r0,
-                    4 => r0 = &r0 ^ &r1,
-                    5 => r1 = &r2 & black_box(v),
-                    6 => r2 = &r3 << 1,
-                    _ => r3 = &r0 + &r2,
+                    0 => r0 = &r1 - black_box(v),
+                    1 => r1 = &r0 ^ &r2,
+                    2 => r2 = black_box(v) - &r3,
+                    3 => r3 = &r0 & black_box(v),
+                    4 => r0 = &r2 + black_box(v),
+                    5 => r1 = &r3 << 1,
+                    6 => r2 = black_box(v) * w,
+                    _ => r3 = &r1 - &r0,
                 }
             }
             (r0, r1, r2, r3)

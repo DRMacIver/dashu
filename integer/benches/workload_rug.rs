@@ -178,20 +178,21 @@ fn bounded_arithmetic_mix_small(c: &mut Criterion) {
     let inputs = build_small_inputs();
     c.bench_function("bounded_arithmetic_mix_small", |b| {
         b.iter(|| {
-            let mut r0 = Integer::from(0);
-            let mut r1 = Integer::from(1);
-            let mut r2 = Integer::from(-1);
-            let mut r3 = Integer::from(2);
+            let mut r0 = inputs[0].clone();
+            let mut r1 = inputs[1].clone();
+            let mut r2 = inputs[2].clone();
+            let mut r3 = inputs[3].clone();
             for (i, v) in inputs.iter().enumerate() {
+                let w = &inputs[i.wrapping_add(7) & (N - 1)];
                 match i & 7 {
-                    0 => r0 = Integer::from(&r0 + black_box(v)),
-                    1 => r1 = Integer::from(&r1 - black_box(v)),
-                    2 => r2 = Integer::from(&r2 * black_box(v)),
-                    3 => r3 = Integer::from(&r3 + &r0),
-                    4 => r0 = Integer::from(&r0 ^ &r1),
-                    5 => r1 = Integer::from(&r2 & black_box(v)),
-                    6 => r2 = Integer::from(&r3 << 1u32),
-                    _ => r3 = Integer::from(&r0 + &r2),
+                    0 => r0 = Integer::from(&r1 - black_box(v)),
+                    1 => r1 = Integer::from(&r0 ^ &r2),
+                    2 => r2 = Integer::from(black_box(v) - &r3),
+                    3 => r3 = Integer::from(&r0 & black_box(v)),
+                    4 => r0 = Integer::from(&r2 + black_box(v)),
+                    5 => r1 = Integer::from(&r3 << 1u32),
+                    6 => r2 = Integer::from(black_box(v) * w),
+                    _ => r3 = Integer::from(&r1 - &r0),
                 }
             }
             (r0, r1, r2, r3)
