@@ -34,10 +34,6 @@ cfg_if! {
         #[path = "x86_64/mod.rs"]
         mod arch_impl;
     }
-    else if #[cfg(target_arch = "aarch64")] {
-        #[path = "aarch64/mod.rs"]
-        mod arch_impl;
-    }
     else if #[cfg(any(
             target_arch = "arm",
             target_arch = "mips",
@@ -48,6 +44,7 @@ cfg_if! {
         mod arch_impl;
     }
     else if #[cfg(any(
+            target_arch = "aarch64",
             target_arch = "mips64",
             target_arch = "powerpc64"))] {
         #[path = "generic_64_bit/mod.rs"]
