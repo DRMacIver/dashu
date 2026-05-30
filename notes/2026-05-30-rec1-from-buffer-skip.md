@@ -116,25 +116,72 @@ side-effect of marking `from_buffer` `#[inline]`: the bitwise impls
 in `bits.rs` benefit from cross-callsite specialisation even though
 they don't take the explicit `from_buffer_normalized` path.
 
+## Post-Rec1 flat profiles
+
+Same procedure as the original profile, against the post-Rec1 binary.
+
+### `sum-small` (post-Rec1)
+
+```
+self%   incl%  function
+50.13   99.83  profile_workload::main
+16.13   16.13  add::add_dword_in_place
+13.76   13.76  add::sub_dword_in_place
+ 9.75   27.09  Add<TypedRepr> for TypedReprRef::add
+ 6.80    6.80  Repr::Drop::drop
+ 0.63    0.63  cmp::cmp_in_place
+```
+
+Comparison to pre-Rec1:
+
+- `Repr::from_buffer`: 9.00 % → not in top — vanished into inlined
+  callers as designed.
+- `main + Add::add` inclusive bucket (combined small-int hot path +
+  dispatch): 53.3 % → 59.9 %, a +6.6 pp share growth in a smaller
+  total. That's the slack the absorbed `from_buffer` work left.
+- `Repr::Drop::drop`: 5.78 % → 6.80 %. Same absolute work; the
+  denominator shrank.
+- The two inner kernels (`add_dword_in_place`, `sub_dword_in_place`)
+  are now the two largest single hot spots after the dispatch chain.
+
+### `mix-small` (post-Rec1)
+
+```
+self%   incl%  function
+18.14   18.14  add::add_same_len_in_place
+16.65   16.65  _platform_memmove
+10.93   11.09  mul_ops::mul_large_dword
+ 8.00    8.00  add::sub_in_place_with_sign
+ 7.04   99.60  profile_workload::main
+ 4.12    8.09  shift_ops::shl_large_ref
+ 1.29    1.29  Repr::Drop::drop
+ 0.98    0.98  Repr::from_buffer
+```
+
+`mix-small` barely shifts. `Repr::from_buffer` dropped from 2.52 % to
+0.98 %, but `_platform_memmove` remains at 16.65 % — Rec 3 territory,
+and the picture there is unchanged by this patch. That matches the
+–2.5 % bench delta.
+
 ## Where this leaves the next step
 
-The dispatch-chain story from the original profile (Rec 2: inline +
-inline fast path, ~7.5 % self / 29 % inclusive in `sum-small`) is
-unchanged by this patch. Re-running the profile against the post-opt
-binary should now show:
+`sum-small`'s remaining ranked hot spots after Rec 1:
 
-- `Repr::from_buffer` / `Repr::Drop` contributions on `sum-small`
-  reduced to noise (the cost they accounted for is gone).
-- The inline → heap dispatch and `add::add_dword_in_place` /
-  `add::sub_dword_in_place` (the inner kernels themselves) now make
-  up a larger fraction of the remaining time — that's where Rec 2
-  bites next.
+1. The dispatch chain (`Add<TypedRepr> for TypedReprRef::add` at
+   9.75 % self / 27.09 % inclusive) — what Rec 2 targets directly.
+   With the `from_buffer` overhead removed, the relative payoff of a
+   shorter dispatch is now larger than the headline 5 – 10 %
+   prediction from the original notes.
+2. `Repr::Drop::drop` at 6.80 % — `Drop` isn't `#[inline]` on
+   either `Repr` or `Buffer`; the call boundary may be visible
+   enough to chase with the same low-effort `#[inline]` change.
+3. The kernels themselves (`add_dword_in_place`, `sub_dword_in_place`)
+   are at the rough floor for portable Rust ALU work and probably
+   aren't movable without arch-specific intrinsics.
 
-Recommended sequence:
+For `mix-small`, Rec 3 (`_platform_memmove` at 16.65 %) is now
+proportionally more of the workload than it was — the right next
+step there.
 
-1. Re-profile `sum-small` against the post-opt binary, append the
-   new flat profile here.
-2. Implement Rec 2 (`AddAssign` short-circuit when both reprs are
-   inline) and compare against the same baseline.
-3. Then take on Rec 3 (the `_platform_memmove` in `mix-small`),
-   informed by an updated inclusive call graph.
+Recommended sequence: Rec 2 on `sum-small`, then a second
+re-profile, then Rec 3 informed by the post-Rec2 picture.
