@@ -498,6 +498,177 @@ fn ubig_min_inline(c: &mut Criterion) {
     group.finish();
 }
 
+fn integer_choice_to_index(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("integer_choice_to_index");
+
+    let scenarios: [(&str, Integer, Integer, Integer); 2] = [
+        (
+            "i128_range",
+            Integer::from(i128::MIN + 1),
+            Integer::from(0),
+            Integer::from(i128::MAX),
+        ),
+        (
+            "heap_range",
+            Integer::from(0),
+            Integer::from(0),
+            Integer::from(1u128) << 200,
+        ),
+    ];
+
+    for (label, min_v, s, max_v) in scenarios.iter() {
+        let values: Vec<Integer> = (0..32)
+            .map(|i| {
+                let class = match i % 4 {
+                    0 => ValueClass::OneWord,
+                    1 => ValueClass::TwoWord,
+                    _ => ValueClass::OneWord,
+                };
+                let mag = sample_rug_int(class, &mut rng);
+                if &mag > max_v {
+                    max_v.clone()
+                } else if &mag < min_v {
+                    min_v.clone()
+                } else {
+                    mag
+                }
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(label),
+            &(min_v.clone(), s.clone(), max_v.clone(), values),
+            |b, (min_v, s, max_v, values)| {
+                let mut i = 0usize;
+                let one = Integer::from(1u32);
+                b.iter(|| {
+                    let v = &values[i & 31];
+                    i = i.wrapping_add(1);
+                    if v == s {
+                        Integer::from(0)
+                    } else {
+                        let above = Integer::from(max_v - s).abs();
+                        let below = Integer::from(s - min_v).abs();
+                        let d_abs = Integer::from(v - s).abs();
+                        let d_minus_one = Integer::from(&d_abs - &one);
+                        let mut count = Integer::from(std::cmp::min(&d_minus_one, &above))
+                            + std::cmp::min(&d_minus_one, &below);
+                        if v > s {
+                            return Integer::from(count + &one);
+                        }
+                        if d_abs <= above {
+                            count += Integer::from(1u32);
+                        }
+                        Integer::from(count + Integer::from(1u32))
+                    }
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn nodes_sort_key_lex_cmp(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("nodes_sort_key_lex_cmp");
+
+    type Node = (Integer, Integer);
+
+    fn sort_key(node: &Node) -> (Integer, bool) {
+        let (value, target) = node;
+        (Integer::from(value - target).abs(), value < target)
+    }
+
+    fn lex_cmp(a: &[Node], b: &[Node]) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match a.len().cmp(&b.len()) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+        for (x, y) in a.iter().zip(b.iter()) {
+            let key_x = sort_key(x);
+            let key_y = sort_key(y);
+            match (&key_x.0, key_x.1).cmp(&(&key_y.0, key_y.1)) {
+                Ordering::Equal => continue,
+                ord => return ord,
+            }
+        }
+        Ordering::Equal
+    }
+
+    for n_nodes in [4usize, 16, 64] {
+        let a: Vec<Node> = (0..n_nodes)
+            .map(|_| (sample_rug_int(ValueClass::OneWord, &mut rng), Integer::new()))
+            .collect();
+        let mut b = a.clone();
+        let mid = n_nodes / 2;
+        b[mid].0 = Integer::from(&b[mid].0 + Integer::from(1));
+
+        group.bench_with_input(
+            BenchmarkId::new("same_prefix", n_nodes),
+            &(a, b),
+            |bn, (a, b)| {
+                bn.iter(|| lex_cmp(black_box(a), black_box(b)));
+            },
+        );
+
+        let a: Vec<Node> = (0..n_nodes)
+            .map(|_| (sample_rug_int(ValueClass::TwoWord, &mut rng), Integer::new()))
+            .collect();
+        let mut b = a.clone();
+        b[0].0 = Integer::from(&b[0].0 + Integer::from(1));
+        group.bench_with_input(
+            BenchmarkId::new("differ_at_zero", n_nodes),
+            &(a, b),
+            |bn, (a, b)| {
+                bn.iter(|| lex_cmp(black_box(a), black_box(b)));
+            },
+        );
+    }
+    group.finish();
+}
+
+fn shrinker_descent_subtract(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("shrinker_descent_subtract");
+
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let triples: Vec<(Integer, Integer, Integer)> = (0..32)
+            .map(|_| {
+                let base = sample_rug_int(class, &mut rng);
+                let min = Integer::from(&base - Integer::from(1024i64));
+                let max = Integer::from(&base + Integer::from(1024i64));
+                (base, min, max)
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &triples,
+            |b, t| {
+                let mut i = 0usize;
+                const STEPS: [u64; 9] = [1, 2, 3, 4, 8, 16, 32, 64, 128];
+                b.iter(|| {
+                    let (base, min, max) = &t[i & 31];
+                    i = i.wrapping_add(1);
+                    let mut valid_count = 0u32;
+                    for n in STEPS {
+                        let cand = Integer::from(base - Integer::from(2u64 * n));
+                        if &cand >= black_box(min) && &cand <= black_box(max) {
+                            valid_count += 1;
+                        }
+                        let cand = Integer::from(base - Integer::from(n));
+                        if &cand >= black_box(min) && &cand <= black_box(max) {
+                            valid_count += 1;
+                        }
+                    }
+                    valid_count
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     ibig_clone_by_class,
@@ -517,6 +688,9 @@ criterion_group!(
     ubig_ref_sub_by_class,
     ibig_boundary_sort,
     ubig_min_inline,
+    integer_choice_to_index,
+    nodes_sort_key_lex_cmp,
+    shrinker_descent_subtract,
 );
 
 criterion_main!(benches);

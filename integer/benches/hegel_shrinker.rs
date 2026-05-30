@@ -606,6 +606,262 @@ fn ubig_min_inline(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// 16. IntegerChoice::to_index — the *forward* index lookup. Sampled the
+//     hegel-rust test suite (cargo test --features native): not in the
+//     headline top-30 dashu-touchers but exercises the same
+//     sub/magnitude/min/add shape as `from_index_full_search`, and is the
+//     direct inverse so any improvement to `from_index`'s building blocks
+//     should land here too.
+//
+//     The implementation (`hegel::native::core::choices::IntegerChoice::to_index`)
+//     is:
+//
+//       above = (max - s).magnitude()
+//       below = (s - min).magnitude()
+//       d_abs = (value - s).magnitude()
+//       d_minus_one = d_abs - 1
+//       count = min(d_minus_one, above) + min(d_minus_one, below)
+//       (+ 1 or 2 depending on sign / d_abs vs above)
+//
+//     This bench drives the body for a fixed (min, s, max) over a Vec of
+//     pre-sampled `value`s, capturing the per-value cost without paying for
+//     the dispatch into `IntegerChoice` itself.
+// ---------------------------------------------------------------------------
+
+fn integer_choice_to_index(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("integer_choice_to_index");
+
+    // Two ranges: a small i128-bracket (the common case, matches the
+    // `from_index_full_search` setup) and a heap-only range, so the bench
+    // reflects both the inline and just-over-inline paths.
+    let scenarios: [(&str, IBig, IBig, IBig); 2] = [
+        (
+            "i128_range",
+            IBig::from(i128::MIN + 1),
+            IBig::from(0),
+            IBig::from(i128::MAX),
+        ),
+        (
+            "heap_range",
+            IBig::from(0),
+            IBig::from(0),
+            IBig::from(1u128) << 200,
+        ),
+    ];
+
+    for (label, min_v, s, max_v) in scenarios.iter() {
+        // Pre-sample 32 in-range values. Mix nasty pool with random draws
+        // so we don't end up only exercising one branch (`d_abs <= above`).
+        let values: Vec<IBig> = (0..32)
+            .map(|i| {
+                let class = match i % 4 {
+                    0 => ValueClass::OneWord,
+                    1 => ValueClass::TwoWord,
+                    _ => ValueClass::OneWord,
+                };
+                let mag = sample_ibig(class, &mut rng);
+                // Clamp into range so to_index doesn't have to reject.
+                let v = if &mag > max_v {
+                    max_v.clone()
+                } else if &mag < min_v {
+                    min_v.clone()
+                } else {
+                    mag
+                };
+                v
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(label),
+            &(min_v.clone(), s.clone(), max_v.clone(), values),
+            |b, (min_v, s, max_v, values)| {
+                let mut i = 0usize;
+                let one = UBig::from(1u32);
+                b.iter(|| {
+                    let v = &values[i & 31];
+                    i = i.wrapping_add(1);
+                    // Body of IntegerChoice::to_index, inlined.
+                    if v == s {
+                        UBig::from(0u32)
+                    } else {
+                        let above = (max_v - s).unsigned_abs();
+                        let below = (s - min_v).unsigned_abs();
+                        let d_abs = (v - s).unsigned_abs();
+                        let d_minus_one = &d_abs - &one;
+                        let mut count =
+                            std::cmp::min(&d_minus_one, &above) + std::cmp::min(&d_minus_one, &below);
+                        if v > s {
+                            return count + &one;
+                        }
+                        if d_abs <= above {
+                            count += UBig::from(1u32);
+                        }
+                        count + UBig::from(1u32)
+                    }
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 17. NodesSortKey::cmp — lazy lex compare of two ChoiceNode sequences.
+//
+//     Hegel's shrinker compares pre/post candidate sequences via
+//     `NodesSortKey::cmp`, which walks both sequences in lockstep and
+//     computes per-node sort keys on the fly. For Integer choice nodes the
+//     per-node key is `(value - shrink_towards).magnitude(), value < shrink_towards`
+//     (an allocated `UBig` + a bool). Sampled at ~0.25 % inclusive of the
+//     hegel-rust test suite (and `sort_key_ref` accounts for another
+//     ~0.18 %).
+//
+//     The lazy variant is meaningfully different from
+//     `shrinker_consider_workload` (which eagerly materialises all sort keys
+//     into a `Vec`): when the sequences differ early, the lazy form does far
+//     less work, and the per-iteration allocation cost is what the real
+//     shrinker pays. Two parameterisations:
+//
+//     * `same_prefix` — sequences agree for the first half, differ in the
+//       middle. Exercises the typical "small change to a long shrunk
+//       sequence" path.
+//     * `differ_at_zero` — sequences differ at position 0. Tests the early-
+//       exit fast path where we only allocate two sort keys.
+// ---------------------------------------------------------------------------
+
+fn nodes_sort_key_lex_cmp(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("nodes_sort_key_lex_cmp");
+
+    // Each "node" is a (value, shrink_towards) pair; the sort key is
+    // ((value - shrink_towards).magnitude(), value < shrink_towards). This
+    // matches `ChoiceNode::sort_key_ref` for the Integer variant.
+    type Node = (IBig, IBig);
+
+    fn sort_key(node: &Node) -> (UBig, bool) {
+        let (value, target) = node;
+        ((value - target).unsigned_abs(), value < target)
+    }
+
+    fn lex_cmp(a: &[Node], b: &[Node]) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match a.len().cmp(&b.len()) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+        for (x, y) in a.iter().zip(b.iter()) {
+            let key_x = sort_key(x);
+            let key_y = sort_key(y);
+            match (&key_x.0, key_x.1).cmp(&(&key_y.0, key_y.1)) {
+                Ordering::Equal => continue,
+                ord => return ord,
+            }
+        }
+        Ordering::Equal
+    }
+
+    for n_nodes in [4usize, 16, 64] {
+        // Scenario A: sequences share the first half, differ in the middle.
+        let a: Vec<Node> = (0..n_nodes)
+            .map(|_| (sample_ibig(ValueClass::OneWord, &mut rng), IBig::from(0)))
+            .collect();
+        let mut b = a.clone();
+        let mid = n_nodes / 2;
+        b[mid].0 = &b[mid].0 + IBig::from(1);
+
+        group.bench_with_input(
+            BenchmarkId::new("same_prefix", n_nodes),
+            &(a, b),
+            |bn, (a, b)| {
+                bn.iter(|| lex_cmp(black_box(a), black_box(b)));
+            },
+        );
+
+        // Scenario B: differ at index 0 — cmp returns after one pair of
+        // sort_key allocations.
+        let a: Vec<Node> = (0..n_nodes)
+            .map(|_| (sample_ibig(ValueClass::TwoWord, &mut rng), IBig::from(0)))
+            .collect();
+        let mut b = a.clone();
+        b[0].0 = &b[0].0 + IBig::from(1);
+        group.bench_with_input(
+            BenchmarkId::new("differ_at_zero", n_nodes),
+            &(a, b),
+            |bn, (a, b)| {
+                bn.iter(|| lex_cmp(black_box(a), black_box(b)));
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 18. shrinker descent step — the inner body of `find_integer` used by
+//     `binary_search_integer_towards_zero`. The shrinker tries candidates
+//     `base - BigInt::from(2 * n as u64)` for n = 1, 2, 4, 8, ... until the
+//     predicate fails, then binary-searches the bracket.
+//
+//     The dashu-touching part is the candidate construction + range
+//     validation: `IBig::from(small_const)`, `&base - that`, `cand >= min &&
+//     cand <= max`. That's a sub + two cmps per probe. The real shrinker
+//     pays ~0.20 % of total Ir on this loop (`binary_search_integer_towards_zero`
+//     inclusive in the test suite profile).
+//
+//     The bench drives a fixed step sequence so the cost reflects the
+//     dashu-side per-probe overhead, not the test harness's branching.
+// ---------------------------------------------------------------------------
+
+fn shrinker_descent_subtract(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("shrinker_descent_subtract");
+
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        // 32 distinct (base, min, max) triples so the bench loop sees varied
+        // inputs; magnitudes match the inline workload the shrinker actually
+        // touches in tests.
+        let triples: Vec<(IBig, IBig, IBig)> = (0..32)
+            .map(|_| {
+                let base = sample_ibig(class, &mut rng);
+                let min = &base - IBig::from(1024i64);
+                let max = &base + IBig::from(1024i64);
+                (base, min, max)
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &triples,
+            |b, t| {
+                let mut i = 0usize;
+                // Step sequence matches the exponential probe in find_integer:
+                // 1, 2, 3, 4 then geometric (8, 16, 32, ...).
+                const STEPS: [u64; 9] = [1, 2, 3, 4, 8, 16, 32, 64, 128];
+                b.iter(|| {
+                    let (base, min, max) = &t[i & 31];
+                    i = i.wrapping_add(1);
+                    let mut valid_count = 0u32;
+                    for n in STEPS {
+                        // `&base - BigInt::from(2 * n)` is the
+                        // shrink-by-multiples-of-2 probe; the linear-1 probe
+                        // is `&base - BigInt::from(n)`.
+                        let cand = base - IBig::from(2u64 * n);
+                        if &cand >= black_box(min) && &cand <= black_box(max) {
+                            valid_count += 1;
+                        }
+                        let cand = base - IBig::from(n);
+                        if &cand >= black_box(min) && &cand <= black_box(max) {
+                            valid_count += 1;
+                        }
+                    }
+                    valid_count
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     ibig_clone_by_class,
@@ -625,6 +881,9 @@ criterion_group!(
     ubig_ref_sub_by_class,
     ibig_boundary_sort,
     ubig_min_inline,
+    integer_choice_to_index,
+    nodes_sort_key_lex_cmp,
+    shrinker_descent_subtract,
 );
 
 criterion_main!(benches);
