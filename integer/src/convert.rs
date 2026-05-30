@@ -948,6 +948,9 @@ impl UBig {
     where
         T: PrimitiveUnsigned,
     {
+        if let Some((_, dw)) = self.0.as_inline_signed() {
+            return T::try_from(dw).map_err(|_| ConversionError::OutOfBounds);
+        }
         self.repr().try_to_unsigned()
     }
 
@@ -957,6 +960,10 @@ impl UBig {
     where
         T: PrimitiveSigned,
     {
+        if let Some((_, dw)) = self.0.as_inline_signed() {
+            let mag = T::Unsigned::try_from(dw).map_err(|_| ConversionError::OutOfBounds)?;
+            return T::try_from_sign_magnitude(Sign::Positive, mag);
+        }
         T::try_from_sign_magnitude(Sign::Positive, self.repr().try_to_unsigned()?)
     }
 }
@@ -978,6 +985,14 @@ impl IBig {
     /// Try to convert [IBig] to an unsigned primitive.
     #[inline]
     pub(crate) fn try_to_unsigned<T: PrimitiveUnsigned>(&self) -> Result<T, ConversionError> {
+        if let Some((sign, dw)) = self.0.as_inline_signed() {
+            return match sign {
+                Positive => T::try_from(dw).map_err(|_| ConversionError::OutOfBounds),
+                // Canonical-positive-zero invariant: a negative `Repr` is
+                // strictly negative, so it can never fit an unsigned target.
+                Negative => Err(ConversionError::OutOfBounds),
+            };
+        }
         let (sign, mag) = self.as_sign_repr();
         match sign {
             Positive => mag.try_to_unsigned(),
@@ -988,6 +1003,10 @@ impl IBig {
     /// Try to convert [IBig] to an signed primitive.
     #[inline]
     pub(crate) fn try_to_signed<T: PrimitiveSigned>(&self) -> Result<T, ConversionError> {
+        if let Some((sign, dw)) = self.0.as_inline_signed() {
+            let mag = T::Unsigned::try_from(dw).map_err(|_| ConversionError::OutOfBounds)?;
+            return T::try_from_sign_magnitude(sign, mag);
+        }
         let (sign, mag) = self.as_sign_repr();
         T::try_from_sign_magnitude(sign, mag.try_to_unsigned()?)
     }

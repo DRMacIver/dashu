@@ -54,7 +54,9 @@ impl<'a> Ord for TypedReprRef<'a> {
 impl Ord for UBig {
     #[inline]
     fn cmp(&self, other: &UBig) -> Ordering {
-        self.repr().cmp(&other.repr())
+        // UBig capacities are always positive, so magnitude_cmp gives the
+        // correct ordering and we skip the sign-handling in signed_cmp.
+        self.0.magnitude_cmp(&other.0)
     }
 }
 
@@ -68,14 +70,7 @@ impl PartialOrd for UBig {
 impl Ord for IBig {
     #[inline]
     fn cmp(&self, other: &IBig) -> Ordering {
-        let (lhs_sign, lhs_mag) = self.as_sign_repr();
-        let (rhs_sign, rhs_mag) = other.as_sign_repr();
-        match (lhs_sign, rhs_sign) {
-            (Positive, Positive) => lhs_mag.cmp(&rhs_mag),
-            (Positive, Negative) => Ordering::Greater,
-            (Negative, Positive) => Ordering::Less,
-            (Negative, Negative) => rhs_mag.cmp(&lhs_mag),
-        }
+        self.0.signed_cmp(&other.0)
     }
 }
 

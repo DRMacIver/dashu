@@ -8,6 +8,7 @@ use crate::{
     Sign,
 };
 use core::{
+    cmp::Ordering,
     fmt::{self, Write},
     hash::{Hash, Hasher},
     hint::unreachable_unchecked,
@@ -453,9 +454,13 @@ impl Repr {
                 buffer.push(ones_word(hi_bits as _));
             }
 
-            // SAFETY: the bit length has been checked and capacity >= length,
-            //         so capacity is nonzero and larger than 2
-            unsafe { mem::transmute(buffer) }
+            // Route through `from_buffer` so the canonical encoding invariant
+            // is preserved (a 128-bit ones value has length 2 here and must
+            // be promoted to the inline DoubleWord form). Direct transmute
+            // would leave a heap-encoded value where `data.heap.1 < 3`, which
+            // is a representation that `PartialEq` no longer recognises as
+            // equal to its inline counterpart.
+            Self::from_buffer(buffer)
         }
     }
 
@@ -653,10 +658,127 @@ impl Drop for Repr {
 impl PartialEq for Repr {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.as_sign_slice() == other.as_sign_slice()
+        // The inline encoding is canonical: equal values share the same
+        // `(capacity_sign, capacity_magnitude, data.inline)` triple for any
+        // capacity ≤ 2, and the heap branch has its own canonicalisation via
+        // the `len` field. So sign+scale mismatch ⇒ unequal, and otherwise
+        // we can compare the relevant words directly without going through
+        // the `as_sign_slice` slice-materialisation path.
+        let cap_a = self.capacity.get();
+        let cap_b = other.capacity.get();
+        // Sign mismatch: zero is canonically positive (no negative zero), so
+        // a sign disagreement always means unequal values.
+        if (cap_a > 0) != (cap_b > 0) {
+            return false;
+        }
+        let abs_a = cap_a.unsigned_abs();
+        let abs_b = cap_b.unsigned_abs();
+        let inline_a = abs_a <= 2;
+        let inline_b = abs_b <= 2;
+        // Mixed scales can never be equal: heap representation requires
+        // length ≥ 3, which is a strictly larger magnitude than anything
+        // inline.
+        if inline_a != inline_b {
+            return false;
+        }
+        // SAFETY: capacity tells us which union variant is live.
+        unsafe {
+            if inline_a {
+                self.data.inline == other.data.inline
+            } else {
+                let len_a = self.data.heap.1;
+                let len_b = other.data.heap.1;
+                if len_a != len_b {
+                    return false;
+                }
+                let slice_a = slice::from_raw_parts(self.data.heap.0, len_a);
+                let slice_b = slice::from_raw_parts(other.data.heap.0, len_b);
+                slice_a == slice_b
+            }
+        }
     }
 }
 impl Eq for Repr {}
+
+impl Repr {
+    /// Compare magnitudes (absolute values) of two `Repr`s, ignoring sign.
+    ///
+    /// This bypasses the `as_sign_typed` → `TypedReprRef::cmp` chain for the
+    /// inline case: when both sides are inline we read both words from each
+    /// union and compare a single `DoubleWord`. Same-scale heap comparison
+    /// falls through to the existing length-then-words logic.
+    #[inline]
+    pub fn magnitude_cmp(&self, other: &Repr) -> Ordering {
+        let abs_a = self.capacity.get().unsigned_abs();
+        let abs_b = other.capacity.get().unsigned_abs();
+        // SAFETY: capacity discriminates inline vs heap; for either branch we
+        // touch only the live union field.
+        unsafe {
+            if abs_a <= 2 && abs_b <= 2 {
+                let dw_a = double_word(self.data.inline[0], self.data.inline[1]);
+                let dw_b = double_word(other.data.inline[0], other.data.inline[1]);
+                dw_a.cmp(&dw_b)
+            } else if abs_a <= 2 {
+                Ordering::Less
+            } else if abs_b <= 2 {
+                Ordering::Greater
+            } else {
+                let slice_a = slice::from_raw_parts(self.data.heap.0, self.data.heap.1);
+                let slice_b = slice::from_raw_parts(other.data.heap.0, other.data.heap.1);
+                let len_cmp = slice_a.len().cmp(&slice_b.len());
+                if len_cmp != Ordering::Equal {
+                    return len_cmp;
+                }
+                slice_a.iter().rev().cmp(slice_b.iter().rev())
+            }
+        }
+    }
+
+    /// If the value fits inline (capacity ≤ 2), return its sign and the
+    /// magnitude packed into a `DoubleWord`; otherwise return `None`.
+    ///
+    /// Used by primitive-conversion fast paths to skip the `as_sign_typed`
+    /// → `TypedReprRef::try_to_unsigned` → `try_from_sign_magnitude` dispatch
+    /// chain when the value is already known to fit in a `DoubleWord`.
+    #[inline]
+    pub fn as_inline_signed(&self) -> Option<(Sign, DoubleWord)> {
+        let cap = self.capacity.get();
+        let abs_cap = cap.unsigned_abs();
+        if abs_cap <= 2 {
+            // SAFETY: cap ≤ 2 means the inline variant is live.
+            let dw = unsafe { double_word(self.data.inline[0], self.data.inline[1]) };
+            let sign = if cap > 0 {
+                Sign::Positive
+            } else {
+                Sign::Negative
+            };
+            Some((sign, dw))
+        } else {
+            None
+        }
+    }
+
+    /// Compare two signed (`IBig`-shaped) `Repr`s.
+    ///
+    /// Uses the canonical-positive-zero invariant: zero always has positive
+    /// capacity, so a sign disagreement is a strict ordering and never a tie.
+    #[inline]
+    pub fn signed_cmp(&self, other: &Repr) -> Ordering {
+        let pos_a = self.capacity.get() > 0;
+        let pos_b = other.capacity.get() > 0;
+        match (pos_a, pos_b) {
+            (true, false) => return Ordering::Greater,
+            (false, true) => return Ordering::Less,
+            _ => {}
+        }
+        let mag = self.magnitude_cmp(other);
+        if pos_a {
+            mag
+        } else {
+            mag.reverse()
+        }
+    }
+}
 
 impl fmt::Debug for Repr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
