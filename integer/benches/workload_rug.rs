@@ -85,6 +85,21 @@ fn string_round_trip(c: &mut Criterion) {
     });
 }
 
+fn string_round_trip_under_1kbit(c: &mut Criterion) {
+    let inputs = build_under_1kbit_inputs();
+    c.bench_function("string_round_trip_under_1kbit", |b| {
+        b.iter(|| {
+            let mut last = Integer::new();
+            for v in &inputs {
+                let s = black_box(v).to_string();
+                let parsed: Integer = s.parse().unwrap();
+                last = parsed;
+            }
+            last
+        })
+    });
+}
+
 fn bounded_arithmetic_mix(c: &mut Criterion) {
     let inputs = build_mixed_inputs();
     c.bench_function("bounded_arithmetic_mix", |b| {
@@ -206,6 +221,7 @@ criterion_group!(
     running_sum_and_compare_small,
     running_sum_and_compare_under_1kbit,
     string_round_trip,
+    string_round_trip_under_1kbit,
     bounded_arithmetic_mix,
     bounded_arithmetic_mix_small,
     bounded_arithmetic_mix_under_1kbit,

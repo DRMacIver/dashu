@@ -106,6 +106,24 @@ fn string_round_trip(c: &mut Criterion) {
     });
 }
 
+/// Sub-1-kbit string round-trip. Same shape as the mixed-input version
+/// but every value ≤ 256 bits, so no input pulls the bench into GMP's
+/// asymptotic-base-conversion regime.
+fn string_round_trip_under_1kbit(c: &mut Criterion) {
+    let inputs = build_under_1kbit_inputs();
+    c.bench_function("string_round_trip_under_1kbit", |b| {
+        b.iter(|| {
+            let mut last = IBig::from(0);
+            for v in &inputs {
+                let s = black_box(v).to_string();
+                let parsed: IBig = s.parse().unwrap();
+                last = parsed;
+            }
+            last
+        })
+    });
+}
+
 /// Scenario 3: bounded arithmetic mix.
 ///
 /// A scripted sequence of `+`, `-`, `*`, `<<`, `&` over a small working set.
@@ -270,6 +288,7 @@ criterion_group!(
     running_sum_and_compare_small,
     running_sum_and_compare_under_1kbit,
     string_round_trip,
+    string_round_trip_under_1kbit,
     bounded_arithmetic_mix,
     bounded_arithmetic_mix_small,
     bounded_arithmetic_mix_under_1kbit,
