@@ -79,7 +79,7 @@ pub mod repr {
 
     impl<'l, 'r> Add<TypedReprRef<'r>> for TypedReprRef<'l> {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn add(self, rhs: TypedReprRef) -> Repr {
             match (self, rhs) {
                 (RefSmall(dword0), RefSmall(dword1)) => add_dword(dword0, dword1),
@@ -98,7 +98,7 @@ pub mod repr {
 
     impl<'l> Add<TypedRepr> for TypedReprRef<'l> {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn add(self, rhs: TypedRepr) -> Repr {
             match (self, rhs) {
                 (RefSmall(dword0), Small(dword1)) => add_dword(dword0, dword1),
@@ -111,7 +111,7 @@ pub mod repr {
 
     impl<'r> Add<TypedReprRef<'r>> for TypedRepr {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn add(self, rhs: TypedReprRef) -> Repr {
             // add is commutative
             rhs.add(self)
@@ -120,7 +120,7 @@ pub mod repr {
 
     impl Add<TypedRepr> for TypedRepr {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn add(self, rhs: TypedRepr) -> Repr {
             match (self, rhs) {
                 (Small(dword0), Small(dword1)) => add_dword(dword0, dword1),
@@ -194,7 +194,7 @@ pub mod repr {
 
     impl<'l, 'r> Sub<TypedReprRef<'r>> for TypedReprRef<'l> {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub(self, rhs: TypedReprRef) -> Repr {
             match (self, rhs) {
                 (RefSmall(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
@@ -207,7 +207,7 @@ pub mod repr {
 
     impl<'r> Sub<TypedReprRef<'r>> for TypedRepr {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub(self, rhs: TypedReprRef) -> Repr {
             match (self, rhs) {
                 (Small(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
@@ -220,7 +220,7 @@ pub mod repr {
 
     impl<'l> Sub<TypedRepr> for TypedReprRef<'l> {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub(self, rhs: TypedRepr) -> Repr {
             match (self, rhs) {
                 (RefSmall(dword0), Small(dword1)) => sub_dword(dword0, dword1),
@@ -233,7 +233,7 @@ pub mod repr {
 
     impl Sub<TypedRepr> for TypedRepr {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub(self, rhs: TypedRepr) -> Repr {
             match (self, rhs) {
                 (Small(dword0), Small(dword1)) => sub_dword(dword0, dword1),
@@ -373,7 +373,7 @@ mod repr_signed {
 
     impl<'l, 'r> SubSigned<TypedReprRef<'r>> for TypedReprRef<'l> {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub_signed(self, rhs: TypedReprRef<'r>) -> Repr {
             match (self, rhs) {
                 (RefSmall(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
@@ -394,7 +394,7 @@ mod repr_signed {
 
     impl<'l> SubSigned<TypedRepr> for TypedReprRef<'l> {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub_signed(self, rhs: TypedRepr) -> Self::Output {
             match (self, rhs) {
                 (RefSmall(dword0), Small(dword1)) => sub_dword(dword0, dword1),
@@ -407,7 +407,7 @@ mod repr_signed {
 
     impl<'r> SubSigned<TypedReprRef<'r>> for TypedRepr {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub_signed(self, rhs: TypedReprRef) -> Self::Output {
             match (self, rhs) {
                 (Small(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
@@ -420,7 +420,7 @@ mod repr_signed {
 
     impl SubSigned<TypedRepr> for TypedRepr {
         type Output = Repr;
-        #[inline]
+        #[inline(always)]
         fn sub_signed(self, rhs: TypedRepr) -> Self::Output {
             match (self, rhs) {
                 (Small(dword0), Small(dword1)) => sub_dword(dword0, dword1),
