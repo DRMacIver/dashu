@@ -444,6 +444,168 @@ fn ibig_hashmap_keys(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// 12. from_index full binary search — the top dashu bottleneck at ~12.6% of
+//     total Ir (2.83% repr + 5.7% UBig::add + 4.1% UBig::sub). Simulates
+//     IntegerChoice::from_index over a full i128-range choice: binary search
+//     with mid = lo + ((hi - lo) >> 1), total = min(mid, above) + min(mid, below),
+//     repeated ~128 iterations for i128::MIN..i128::MAX.
+// ---------------------------------------------------------------------------
+
+fn from_index_full_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("from_index_full_search");
+
+    // i128 range: above = i128::MAX, below = i128::MIN.abs() = i128::MAX + 1
+    // This is the common case for IntegerChoice{min: i128::MIN+1, max: i128::MAX, shrink_towards: 0}
+    let above = UBig::from(i128::MAX as u128);
+    let below = UBig::from(i128::MAX as u128 + 1);
+
+    for target_frac in [0.0f64, 0.25, 0.5, 0.75, 1.0] {
+        let target_idx = {
+            let max_idx = &above + &below;
+            let frac_bits = (target_frac * 1000.0) as u128;
+            &max_idx * UBig::from(frac_bits) / UBig::from(1000u32)
+        };
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("frac_{:.0}pct", target_frac * 100.0)),
+            &target_idx,
+            |b, idx| {
+                b.iter(|| {
+                    let one = UBig::from(1u32);
+                    let mut lo = one.clone();
+                    let mut hi = std::cmp::max(&above, &below).clone();
+                    while lo < hi {
+                        let mid = &lo + &((&hi - &lo) >> 1usize);
+                        let total = std::cmp::min(&mid, &above) + std::cmp::min(&mid, &below);
+                        if total >= *black_box(idx) {
+                            hi = mid;
+                        } else {
+                            lo = mid + &one;
+                        }
+                    }
+                    lo
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 13. By-ref UBig add/sub — the from_index loop operates on &UBig references,
+//     not owned values. The existing benches cover owned UBig + UBig; this
+//     covers the &UBig + &UBig path which is 5.7% of Ir.
+// ---------------------------------------------------------------------------
+
+fn ubig_ref_add_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_ref_add");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let pairs: Vec<(UBig, UBig)> = (0..32)
+            .map(|_| (sample_ubig(class, &mut rng), sample_ubig(class, &mut rng)))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    black_box(a) + black_box(c)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn ubig_ref_sub_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_ref_sub");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let pairs: Vec<(UBig, UBig)> = (0..32)
+            .map(|_| {
+                let a = sample_ubig(class, &mut rng);
+                let b = sample_ubig(class, &mut rng);
+                // Ensure a >= b so subtraction doesn't panic.
+                if a >= b { (a, b) } else { (b, a) }
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    black_box(a) - black_box(c)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 14. Nasty-value sort — biased_i128_sample builds a Vec of ~258 boundary
+//     IBig values (0, ±1, ±2^k for k in 0..=128, min, max), dedup+sorts them.
+//     quicksort on IBig is 0.65% of Ir, exercising Repr::cmp.
+// ---------------------------------------------------------------------------
+
+fn ibig_boundary_sort(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    c.bench_function("ibig_boundary_sort", |b| {
+        let min = IBig::from(i128::MIN + 1);
+        let max = IBig::from(i128::MAX);
+
+        b.iter(|| {
+            let mut values = vec![min.clone(), max.clone(), IBig::from(0)];
+            for sign in [1i128, -1] {
+                for exp in 0..=128u32 {
+                    let v = IBig::from(sign) * IBig::from(1u128 << exp.min(127));
+                    values.push(v);
+                }
+            }
+            values.push(IBig::from(rand_v08::Rng::gen_range(&mut rng, -10i64..10)));
+            values.sort();
+            values.dedup();
+            black_box(values.len())
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 15. UBig::min — used heavily in from_index: std::cmp::min(&mid, &above).
+//     Each binary search iteration does 2× min (which is Ord::cmp + branch).
+//     This micro-bench isolates UBig comparison cost on inline values.
+// ---------------------------------------------------------------------------
+
+fn ubig_min_inline(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_min");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let pairs: Vec<(UBig, UBig)> = (0..32)
+            .map(|_| (sample_ubig(class, &mut rng), sample_ubig(class, &mut rng)))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    std::cmp::min(black_box(a), black_box(c))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     ibig_clone_by_class,
@@ -458,6 +620,11 @@ criterion_group!(
     shrinker_consider_workload,
     ubig_binary_search_step,
     ibig_hashmap_keys,
+    from_index_full_search,
+    ubig_ref_add_by_class,
+    ubig_ref_sub_by_class,
+    ibig_boundary_sort,
+    ubig_min_inline,
 );
 
 criterion_main!(benches);
