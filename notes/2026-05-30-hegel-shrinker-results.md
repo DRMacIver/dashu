@@ -86,10 +86,10 @@ fn clone_heap(&self) -> Self { ...heap branch... }
 symmetry (Vec::clone calls T::clone per element, but downstream
 `*dest = src.clone()` patterns may compile to clone_from).
 
-## Heap-path trade-off
+## Heap-path trade-off — initial regression, then clawed back
 
-`clone_heap` being `#[inline(never)]` means heap clones now pay an
-extra function-call boundary. The hegel_shrinker bench shows:
+`clone_heap` being `#[inline(never)]` means heap clones pay an extra
+function-call boundary. The initial fast-path-only patch showed:
 
 | Bench                          | Δ vs current  |
 | ------------------------------ | ------------- |
@@ -97,35 +97,110 @@ extra function-call boundary. The hegel_shrinker bench shows:
 | ibig_clone/mid                 | +12.7 %       |
 | ibig_clone/large               | ~0 %          |
 
-I experimentally removed `#[inline(never)]` (leaving only `#[cold]`),
-expecting LLVM to inline back where profitable. Instead the heap case
-got *worse* (mid: +49 %, large: +15 %), apparently because the
-inlined-in-clone shape compiles less well than going through a normal
-function call. Restored `#[inline(never)]` as the better trade-off.
+Two follow-up experiments cleared this up:
 
-For the hegel shrinker workload (overwhelmingly inline values), the
-trade is unambiguously good. A different downstream consumer with
-heavy mid-sized clones would notice; if that comes up we can revisit.
+### Experiment 1: drop `#[cold]`
 
-## Headline bench impact
+Removing `#[cold]` (keeping `#[inline(never)]`) shifted things:
 
-vs `current` baseline saved before the change (so this is the delta
-from "everything before hegel_shrinker bench was added" — i.e. on
-top of all the Rec 1 / Rec 2 / etc. work):
+| Bench                          | with `#[cold]` | without `#[cold]` |
+| ------------------------------ | -------------- | ----------------- |
+| ibig_clone/zero                | -20.0 %        | -16.8 %           |
+| ibig_clone/two_word            | -21.4 %        | -18.4 %           |
+| ibig_clone/just_over_inline    | +7.7 %         | +9.9 %            |
+| ibig_clone/mid                 | +12.7 %        | +12.8 %           |
+| shrinker_consider/16           | -25.5 %        | -26.9 %           |
+| **shrinker_consider/64**       | **-29.1 %**    | **-32.4 %**       |
+
+Surprising: `#[cold]` helps the isolated clone microbench by ~3 pp but
+the realistic compound workload (`shrinker_consider`) does ~3 pp
+*better* without it. Almost certainly a code-layout effect — `#[cold]`
+packs the heap body out of i-cache range of the hot inlined caller,
+but at the cost of some register-allocation pressure in the surrounding
+inlined code. For the shrinker, the second effect dominates.
+
+`#[cold]` dropped.
+
+### Experiment 2: skip the `Buffer` scaffolding entirely
+
+The old heap path went through:
+
+```rust
+let mut new_buffer = Buffer::allocate(len);
+new_buffer.push_slice(slice::from_raw_parts(ptr, len));
+let mut new: Repr = mem::transmute(new_buffer);
+if self.capacity.get() < 0 {
+    new.capacity = NonZeroIsize::new_unchecked(-new.capacity.get());
+}
+```
+
+That's: `allocate` (which calls `allocate_exact` which calls
+`allocate_raw`, with two near-duplicate `0 < cap <= MAX` asserts along
+the way) + `push_slice` (one more `len <= cap - 0` assert) + transmute
++ conditional sign flip. Plus a `__rust_no_alloc_shim_is_unstable_v2`
+bl that the `Buffer` wrapper pulls in.
+
+The new path:
+
+```rust
+let new_cap = len + len / 8 + 2;            // default_capacity inline
+let layout = Layout::from_size_align_unchecked(new_cap * 8, 8);
+let new_ptr = alloc::alloc::alloc(layout) as *mut Word;
+if new_ptr.is_null() { panic_out_of_memory(); }
+ptr::copy_nonoverlapping(src_ptr, new_ptr, len);
+let signed_cap = if self.capacity.get() < 0 { -(new_cap as isize) }
+                 else { new_cap as isize };
+Repr { data: ReprData { heap: (new_ptr, len) },
+       capacity: NonZeroIsize::new_unchecked(signed_cap) }
+```
+
+Same total semantics, fewer redundant asserts, no `Buffer` wrap-and-
+unwrap, signed capacity set in one shot.
+
+Bench result after both experiments (`4a65c01`):
+
+| Bench                          | Initial Repr::clone | + drop cold | + direct-alloc heap |
+| ------------------------------ | ------------------- | ----------- | ------------------- |
+| ibig_clone/zero                | -20.0 %             | -16.8 %     | **-16.6 %**         |
+| ibig_clone/one_word            | -20.3 %             | -17.7 %     | -15.2 %             |
+| ibig_clone/two_word            | -21.4 %             | -18.4 %     | -17.9 %             |
+| ibig_clone/just_over_inline    | +7.7 %              | +9.9 %      | **+2.0 %** (CI of 0) |
+| ibig_clone/mid                 | +12.7 %             | +12.8 %     | **+0.7 %**          |
+| ibig_clone/large               | ~0 %                | -3.1 %      | **-5.1 %**          |
+| shrinker_consider/64           | -29.1 %             | -32.4 %     | **-32.3 %**         |
+
+The heap regression is essentially gone. `just_over_inline` and `mid`
+are statistical noise; `large` is *faster* than the original code by
+~5 % because the streamlined alloc path saves the `Buffer` overhead.
+
+The inline microbench gave up ~3 pp from where it was after the
+initial fast-path patch (-20 % → -17 %), all of it attributable to
+removing `#[cold]`. `shrinker_consider/64` did ~3 pp better in
+exchange, which is the right trade.
+
+## Headline bench impact (after the heap-path follow-up)
+
+vs `current` baseline saved before the Repr::clone changes — so this is
+the delta from "everything before hegel_shrinker bench was added" —
+i.e. on top of all the Rec 1 / Rec 2 / etc. work, with both the
+fast-path patch and the heap-path follow-up applied:
 
 | Bench                            | Δ           |
 | -------------------------------- | ----------- |
-| `shrinker_consider/64`           | **-29.1 %** |
-| `shrinker_consider/16`           | -25.5 %     |
-| `shrinker_consider/4`            | -12.7 %     |
+| `shrinker_consider/64`           | **-32.3 %** |
+| `shrinker_consider/16`           | -27.4 %     |
+| `shrinker_consider/4`            | -13.5 %     |
 | `ibig_clamp/two_word`            | -42.6 %     |
 | `ibig_clamp/one_word`            | -40.2 %     |
 | `ibig_drop/two_word`             | -35.3 %     |
 | `ibig_drop/one_word`             | -34.6 %     |
 | `ibig_drop/zero`                 | -34.2 %     |
-| `ibig_clone/two_word`            | -21.4 %     |
-| `ibig_clone/one_word`            | -20.3 %     |
-| `ibig_clone/zero`                | -20.0 %     |
+| `ibig_clone/two_word`            | -17.9 %     |
+| `ibig_clone/one_word`            | -15.2 %     |
+| `ibig_clone/zero`                | -16.6 %     |
+| `ibig_clone/large`               | -5.1 %      |
+| `ibig_clone/just_over_inline`    | +2.0 % (CI of 0) |
+| `ibig_clone/mid`                 | +0.7 %      |
 
 `shrinker_consider/64` is the most realistic top-level scenario
 (simulates a single `consider()` call: clone 64 ChoiceNodes,
