@@ -414,6 +414,36 @@ fn ubig_binary_search_step(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// 11. HashMap<IBig, _> insert+lookup workload — IBig is sometimes used as a
+//     deterministic-id key in shrinker-adjacent data structures. Exercises
+//     IBig::Hash + IBig::Eq on inline values.
+// ---------------------------------------------------------------------------
+
+fn ibig_hashmap_keys(c: &mut Criterion) {
+    use std::collections::HashMap;
+
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_hashmap_keys");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let keys: Vec<IBig> = (0..128).map(|_| sample_ibig(class, &mut rng)).collect();
+        // Pre-populate the map.
+        let mut map: HashMap<IBig, u32> = HashMap::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            map.insert(k.clone(), i as u32);
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(class.label()), &(keys, map), |b, (ks, m)| {
+            let mut i = 0usize;
+            b.iter(|| {
+                let k = &ks[i & 127];
+                i = i.wrapping_add(1);
+                m.get(black_box(k)).copied()
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     ibig_clone_by_class,
@@ -427,6 +457,7 @@ criterion_group!(
     ibig_shift_right_descent,
     shrinker_consider_workload,
     ubig_binary_search_step,
+    ibig_hashmap_keys,
 );
 
 criterion_main!(benches);
