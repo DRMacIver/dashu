@@ -180,6 +180,237 @@ fn ubig_add_mixed(c: &mut Criterion) {
     group.finish();
 }
 
+// ---- assign-form binops (the direct target of the AddAssign specialisation
+//      work in notes/2026-05-30-initial-profile.md) ----
+//
+// The by-ref `&a + &b` benches above exercise `Add` and the dispatch through
+// `TypedRepr`. The benches below exercise `AddAssign<&UBig> for UBig` (and
+// `IBig`), which is the entry point on the running-sum hot path and the
+// natural place to add an in-place specialisation that bypasses
+// `Repr::from_buffer`.
+
+fn ubig_add_assign_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_add_assign_by_class");
+    for &class in ValueClass::ALL {
+        let starts: Vec<UBig> = (0..32).map(|_| sample_ubig(class, &mut rng)).collect();
+        let rhs: Vec<UBig> = (0..32).map(|_| sample_ubig(class, &mut rng)).collect();
+        group.bench_with_input(BenchmarkId::from_parameter(class.label()), &(starts, rhs), |b, (s, r)| {
+            let mut i = 0usize;
+            b.iter(|| {
+                let mut acc = s[i & 31].clone();
+                acc += black_box(&r[i & 31]);
+                i = i.wrapping_add(1);
+                acc
+            })
+        });
+    }
+    group.finish();
+}
+
+fn ibig_add_assign_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_add_assign_by_class");
+    for &class in ValueClass::ALL {
+        let starts: Vec<IBig> = (0..32).map(|_| sample_ibig(class, &mut rng)).collect();
+        let rhs: Vec<IBig> = (0..32).map(|_| sample_ibig(class, &mut rng)).collect();
+        group.bench_with_input(BenchmarkId::from_parameter(class.label()), &(starts, rhs), |b, (s, r)| {
+            let mut i = 0usize;
+            b.iter(|| {
+                let mut acc = s[i & 31].clone();
+                acc += black_box(&r[i & 31]);
+                i = i.wrapping_add(1);
+                acc
+            })
+        });
+    }
+    group.finish();
+}
+
+fn ubig_sub_assign_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_sub_assign_by_class");
+    // For UBig, build acc = a + b and subtract b, so the result is non-negative.
+    for &class in ValueClass::ALL {
+        let pairs: Vec<(UBig, UBig)> = (0..32)
+            .map(|_| {
+                let a = sample_ubig(class, &mut rng);
+                let b = sample_ubig(class, &mut rng);
+                (&a + &b, b)
+            })
+            .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(class.label()), &pairs, |b, p| {
+            let mut i = 0usize;
+            b.iter(|| {
+                let (start, rhs) = &p[i & 31];
+                let mut acc = start.clone();
+                acc -= black_box(rhs);
+                i = i.wrapping_add(1);
+                acc
+            })
+        });
+    }
+    group.finish();
+}
+
+fn ibig_sub_assign_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_sub_assign_by_class");
+    for &class in ValueClass::ALL {
+        let starts: Vec<IBig> = (0..32).map(|_| sample_ibig(class, &mut rng)).collect();
+        let rhs: Vec<IBig> = (0..32).map(|_| sample_ibig(class, &mut rng)).collect();
+        group.bench_with_input(BenchmarkId::from_parameter(class.label()), &(starts, rhs), |b, (s, r)| {
+            let mut i = 0usize;
+            b.iter(|| {
+                let mut acc = s[i & 31].clone();
+                acc -= black_box(&r[i & 31]);
+                i = i.wrapping_add(1);
+                acc
+            })
+        });
+    }
+    group.finish();
+}
+
+// Diagnostic for the "heap accumulator, small RHS" path that the profile
+// identified as 14.78 % allocator overhead on `sum-small`. The accumulator
+// is heap-resident every iteration and stays heap-resident (no shrink
+// possible) — exactly the case where `Repr::from_buffer` work is pure
+// overhead. A successful AddAssign specialisation should move this bench
+// substantially while leaving the same-class benches above largely flat.
+fn ubig_add_assign_heap_acc_small_rhs(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_add_assign_heap_acc_small_rhs");
+    for &acc_class in &[ValueClass::JustOverInline, ValueClass::Mid, ValueClass::Large] {
+        let acc_starts: Vec<UBig> = (0..32).map(|_| sample_ubig(acc_class, &mut rng)).collect();
+        let rhs: Vec<UBig> = (0..32).map(|_| sample_ubig(ValueClass::OneWord, &mut rng)).collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(acc_class.label()),
+            &(acc_starts, rhs),
+            |b, (s, r)| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let mut acc = s[i & 31].clone();
+                    acc += black_box(&r[i & 31]);
+                    i = i.wrapping_add(1);
+                    acc
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn ibig_add_assign_heap_acc_small_rhs(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_add_assign_heap_acc_small_rhs");
+    for &acc_class in &[ValueClass::JustOverInline, ValueClass::Mid, ValueClass::Large] {
+        let acc_starts: Vec<IBig> = (0..32).map(|_| sample_ibig(acc_class, &mut rng)).collect();
+        let rhs: Vec<IBig> = (0..32).map(|_| sample_ibig(ValueClass::OneWord, &mut rng)).collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(acc_class.label()),
+            &(acc_starts, rhs),
+            |b, (s, r)| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let mut acc = s[i & 31].clone();
+                    acc += black_box(&r[i & 31]);
+                    i = i.wrapping_add(1);
+                    acc
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// Primitive-RHS AddAssign benches — the recommendation explicitly mentions
+// `<i64>` / `<u64>` / `<i128>` / `<u128>` variants of the specialised path.
+// Each starts from a heap-resident accumulator so the per-step finalisation
+// cost is visible; lifting it via specialisation should be measurable here.
+
+fn ibig_add_assign_i64_into_heap_acc(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let acc_starts: Vec<IBig> = (0..32).map(|_| sample_ibig(ValueClass::Mid, &mut rng)).collect();
+    let rhs: Vec<i64> = (0..32).map(|_| rand_v08::Rng::gen(&mut rng)).collect();
+    c.bench_function("ibig_add_assign_i64_into_heap_acc", |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let mut acc = acc_starts[i & 31].clone();
+            acc += black_box(rhs[i & 31]);
+            i = i.wrapping_add(1);
+            acc
+        })
+    });
+}
+
+fn ibig_add_assign_i128_into_heap_acc(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let acc_starts: Vec<IBig> = (0..32).map(|_| sample_ibig(ValueClass::Mid, &mut rng)).collect();
+    let rhs: Vec<i128> = (0..32).map(|_| rand_v08::Rng::gen(&mut rng)).collect();
+    c.bench_function("ibig_add_assign_i128_into_heap_acc", |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let mut acc = acc_starts[i & 31].clone();
+            acc += black_box(rhs[i & 31]);
+            i = i.wrapping_add(1);
+            acc
+        })
+    });
+}
+
+fn ubig_add_assign_u64_into_heap_acc(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let acc_starts: Vec<UBig> = (0..32).map(|_| sample_ubig(ValueClass::Mid, &mut rng)).collect();
+    let rhs: Vec<u64> = (0..32).map(|_| rand_v08::Rng::gen(&mut rng)).collect();
+    c.bench_function("ubig_add_assign_u64_into_heap_acc", |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let mut acc = acc_starts[i & 31].clone();
+            acc += black_box(rhs[i & 31]);
+            i = i.wrapping_add(1);
+            acc
+        })
+    });
+}
+
+fn ubig_add_assign_u128_into_heap_acc(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let acc_starts: Vec<UBig> = (0..32).map(|_| sample_ubig(ValueClass::Mid, &mut rng)).collect();
+    let rhs: Vec<u128> = (0..32).map(|_| rand_v08::Rng::gen(&mut rng)).collect();
+    c.bench_function("ubig_add_assign_u128_into_heap_acc", |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let mut acc = acc_starts[i & 31].clone();
+            acc += black_box(rhs[i & 31]);
+            i = i.wrapping_add(1);
+            acc
+        })
+    });
+}
+
+// One bitwise-assign bench to verify the same-shape claim ("Sub, BitAnd,
+// BitOr, BitXor are all the same pattern") will land — full coverage of all
+// three bitwise ops can pile on once the Add specialisation lands.
+fn ubig_bitxor_assign_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_bitxor_assign_by_class");
+    for &class in ValueClass::ALL {
+        let starts: Vec<UBig> = (0..32).map(|_| sample_ubig(class, &mut rng)).collect();
+        let rhs: Vec<UBig> = (0..32).map(|_| sample_ubig(class, &mut rng)).collect();
+        group.bench_with_input(BenchmarkId::from_parameter(class.label()), &(starts, rhs), |b, (s, r)| {
+            let mut i = 0usize;
+            b.iter(|| {
+                let mut acc = s[i & 31].clone();
+                acc ^= black_box(&r[i & 31]);
+                i = i.wrapping_add(1);
+                acc
+            })
+        });
+    }
+    group.finish();
+}
+
 // ---- comparison / hash / clone (cheap operations that dominate hot loops) ----
 
 fn ubig_eq_same_class(c: &mut Criterion) {
@@ -303,6 +534,17 @@ criterion_group!(
     ubig_mul_by_class,
     ibig_add_by_class,
     ubig_add_mixed,
+    ubig_add_assign_by_class,
+    ibig_add_assign_by_class,
+    ubig_sub_assign_by_class,
+    ibig_sub_assign_by_class,
+    ubig_add_assign_heap_acc_small_rhs,
+    ibig_add_assign_heap_acc_small_rhs,
+    ibig_add_assign_i64_into_heap_acc,
+    ibig_add_assign_i128_into_heap_acc,
+    ubig_add_assign_u64_into_heap_acc,
+    ubig_add_assign_u128_into_heap_acc,
+    ubig_bitxor_assign_by_class,
     ubig_eq_same_class,
     ubig_cmp_same_class,
     ubig_hash_same_class,
