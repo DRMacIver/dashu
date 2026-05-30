@@ -46,6 +46,23 @@ fn test_from_to_be_bytes() {
         200, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
     ];
     assert_eq!(*IBig::from_be_bytes(&bytes).to_be_bytes(), bytes);
+
+    // Regression: negation of a power-of-two magnitude (mag - 1 drops one bit,
+    // so the leading_zeros heuristic on the original magnitude was wrong and
+    // we skipped the sign byte). The round-trip used to yield zero for these.
+    for v in [
+        -(IBig::ONE << 128),
+        -(IBig::ONE << 192),
+        -(IBig::ONE << 256),
+        -(IBig::ONE << 1000),
+        IBig::from(i128::MIN),
+        IBig::from(i64::MIN),
+    ] {
+        let be = v.to_be_bytes();
+        assert_eq!(IBig::from_be_bytes(&be), v, "to/from be_bytes round-trip failed for {v}");
+        let le = v.to_le_bytes();
+        assert_eq!(IBig::from_le_bytes(&le), v, "to/from le_bytes round-trip failed for {v}");
+    }
 }
 
 #[test]

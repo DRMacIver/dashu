@@ -198,6 +198,13 @@ fn test_ibig_shr() {
         ((ibig!(-0xff) << 1000) - ibig!(1), 1000, ibig!(-0x100)),
         ((ibig!(-0xff) << 1000) - (ibig!(1) << 999), 1000, ibig!(-0x100)),
         (ibig!(-0xff) << 1000, 2000, ibig!(-1)),
+        // Regression: negative double-word values shifted by an amount that
+        // equals or exceeds their bit length must round down to -1, not to 0.
+        // Previously `are_dword_low_bits_nonzero` capped n at WORD_BITS instead
+        // of DWORD_BITS and lost the upper-word bits.
+        (::dashu_int::IBig::from(i128::MIN), 128, ibig!(-1)),
+        (::dashu_int::IBig::from(i128::MIN), 200, ibig!(-1)),
+        (::dashu_int::IBig::from(i64::MIN) << 1, 128, ibig!(-1)),
     ];
     for (a, b, c) in &test_cases {
         assert_eq!(a >> b, *c);
