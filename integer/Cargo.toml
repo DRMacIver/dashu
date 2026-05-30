@@ -99,3 +99,8 @@ harness = false
 name = "workload"
 required-features = ["rand"]
 harness = false
+
+[[bench]]
+name = "hegel_shrinker"
+required-features = ["rand"]
+harness = false

@@ -1,0 +1,432 @@
+//! Benchmarks modelling the dashu-int operations that dominate hegel-rust's
+//! shrinker hot path.
+//!
+//! Profiling the hegel-rust native test suite with callgrind against this
+//! branch shows:
+//!
+//! | Operation           | % of total Ir | Notes                                   |
+//! |---------------------|---------------|-----------------------------------------|
+//! | Repr::clone         |  13.24 %      | Cloning IntegerChoice (3 IBig fields)   |
+//! | IBig::sub           |   2.2 %       | sort_key: `value - target`              |
+//! | UBig::add           |   1.0 %       | sort_key / to_index accumulation        |
+//! | IBig cmp/clamp      |   1.1 %       | clamped_shrink_towards, validate        |
+//! | Drop(Repr)          |   0.5 %       | Dropping ChoiceNode / ChoiceKind        |
+//!
+//! Values are almost always in the OneWord or TwoWord range (≤ 128 bits,
+//! inline in Repr). The clone cost comes from volume: the shrinker clones
+//! entire ChoiceNode vectors thousands of times per shrink run, each node
+//! containing three IBig (min, max, shrink_towards) plus one IBig value.
+//!
+//! Run:
+//!   cargo bench -p dashu-int --bench hegel_shrinker --features rand
+
+#[path = "common/mod.rs"]
+mod common;
+
+use common::{sample_ibig, sample_ubig, seeded_rng, ValueClass};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use dashu_int::{IBig, UBig};
+use dashu_int::ops::UnsignedAbs;
+
+// ---------------------------------------------------------------------------
+// 1. Clone — the dominant bottleneck (13 % of shrinker Ir).
+//
+// Each ChoiceNode contains an IntegerChoice (min, max, shrink_towards: 3×IBig)
+// plus a ChoiceValue (1×IBig). The shrinker clones entire Vec<ChoiceNode> on
+// every consider() call, so the per-IBig clone cost is multiplied by
+// 4 * n_nodes * n_candidates.
+// ---------------------------------------------------------------------------
+
+fn ibig_clone_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_clone");
+    for &class in ValueClass::ALL {
+        let inputs: Vec<IBig> = (0..32).map(|_| sample_ibig(class, &mut rng)).collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &inputs,
+            |b, v| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let x = &v[i & 31];
+                    i = i.wrapping_add(1);
+                    black_box(x).clone()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Clone a "ChoiceNode"-shaped struct: 3 IBig fields (min, max, shrink_towards)
+/// + 1 IBig value.  This is the atomic unit the shrinker clones; measuring it
+/// directly captures the aggregate overhead better than per-field clones.
+fn choice_node_clone(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("choice_node_clone");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let nodes: Vec<(IBig, IBig, IBig, IBig)> = (0..32)
+            .map(|_| {
+                let min = sample_ibig(class, &mut rng);
+                let max = sample_ibig(class, &mut rng);
+                let towards = IBig::from(0);
+                let value = sample_ibig(class, &mut rng);
+                (min, max, towards, value)
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &nodes,
+            |b, n| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (min, max, towards, value) = &n[i & 31];
+                    i = i.wrapping_add(1);
+                    (
+                        black_box(min).clone(),
+                        black_box(max).clone(),
+                        black_box(towards).clone(),
+                        black_box(value).clone(),
+                    )
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 2. Drop — paired with clone, every cloned value is eventually dropped.
+//    The shrinker clones a Vec<ChoiceNode>, evaluates it, then drops it.
+// ---------------------------------------------------------------------------
+
+fn ibig_drop_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_drop");
+    for &class in ValueClass::ALL {
+        let templates: Vec<IBig> = (0..32).map(|_| sample_ibig(class, &mut rng)).collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &templates,
+            |b, t| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let x = t[i & 31].clone();
+                    i = i.wrapping_add(1);
+                    drop(black_box(x));
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 3. sort_key pattern: `(value - target).magnitude()`.
+//    Called once per node per consider(), so ~n_nodes * n_candidates times
+//    per shrink run. The sub + magnitude pair is 1.28 % + 0.5 % of Ir.
+// ---------------------------------------------------------------------------
+
+fn ibig_sub_magnitude(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_sub_magnitude");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let pairs: Vec<(IBig, IBig)> = (0..32)
+            .map(|_| (sample_ibig(class, &mut rng), sample_ibig(class, &mut rng)))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (value, target) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    (black_box(value) - black_box(target)).unsigned_abs()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 4. clamped_shrink_towards: `value.clamp(min, max)`.
+//    0.57 % of Ir. Uses Ord::clamp which does two comparisons + one clone.
+// ---------------------------------------------------------------------------
+
+fn ibig_clamp(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_clamp");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let triples: Vec<(IBig, IBig, IBig)> = (0..32)
+            .map(|_| {
+                let mut vals = [
+                    sample_ibig(class, &mut rng),
+                    sample_ibig(class, &mut rng),
+                    sample_ibig(class, &mut rng),
+                ];
+                vals.sort();
+                let [min, value, max] = vals;
+                (min, value, max)
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &triples,
+            |b, t| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (min, value, max) = &t[i & 31];
+                    i = i.wrapping_add(1);
+                    black_box(value).clone().clamp(min.clone(), max.clone())
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 5. validate: `min <= value && value <= max`.
+//    Two comparisons per validate(), called from replace() on every candidate.
+// ---------------------------------------------------------------------------
+
+fn ibig_double_cmp(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_double_cmp");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let triples: Vec<(IBig, IBig, IBig)> = (0..32)
+            .map(|_| {
+                let a = sample_ibig(class, &mut rng);
+                let b = sample_ibig(class, &mut rng);
+                let c = sample_ibig(class, &mut rng);
+                (a, b, c)
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &triples,
+            |b, t| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (min, value, max) = &t[i & 31];
+                    i = i.wrapping_add(1);
+                    black_box(min) <= black_box(value) && black_box(value) <= black_box(max)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 6. IBig from small primitives — used to construct BigInt::from(0),
+//    BigInt::from(1), BigInt::from(n as u64) throughout the shrinker.
+// ---------------------------------------------------------------------------
+
+fn ibig_from_small_consts(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ibig_from_const");
+    group.bench_function("zero", |b| {
+        b.iter(|| IBig::from(black_box(0i64)))
+    });
+    group.bench_function("one", |b| {
+        b.iter(|| IBig::from(black_box(1i64)))
+    });
+    group.bench_function("minus_one", |b| {
+        b.iter(|| IBig::from(black_box(-1i64)))
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 7. UBig::cmp — used in NodeSortKeyRef::cmp on the sort keys (BigUint
+//    distances). 0.22 % of Ir for the comparisons themselves.
+// ---------------------------------------------------------------------------
+
+fn ubig_cmp_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_cmp_shrinker");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let pairs: Vec<(UBig, UBig)> = (0..32)
+            .map(|_| (sample_ubig(class, &mut rng), sample_ubig(class, &mut rng)))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    black_box(a).cmp(black_box(c))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 8. Shift-right descent — the shrinker's binary search uses
+//    `lo + (dist >> k as usize)` where k grows geometrically.
+// ---------------------------------------------------------------------------
+
+fn ibig_shift_right_descent(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ibig_shr_descent");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let pairs: Vec<(IBig, IBig)> = (0..32)
+            .map(|_| {
+                let lo = sample_ibig(class, &mut rng);
+                let dist = sample_ibig(class, &mut rng).unsigned_abs();
+                (lo, IBig::from(dist))
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (lo, dist) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    // Simulate the find_integer inner loop: lo + (dist >> k as usize)
+                    // for k = 1, 2, 4, 8, 16
+                    let mut last = lo.clone();
+                    for k in [1u32, 2, 4, 8, 16] {
+                        last = lo + (black_box(dist) >> k as usize);
+                    }
+                    last
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 9. Shrinker workload — simulates a single consider() call's hot path:
+//    clone n nodes (each 4 IBig), compute sort_key for each (sub + magnitude),
+//    then compare sort key sequences lexicographically.
+//
+//    This is the top-level scenario bench that combines all the above.
+// ---------------------------------------------------------------------------
+
+fn shrinker_consider_workload(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("shrinker_consider");
+
+    for n_nodes in [4, 16, 64] {
+        // Build n "ChoiceNode"s: each has (min, max, shrink_towards, value).
+        let nodes: Vec<(IBig, IBig, IBig, IBig)> = (0..n_nodes)
+            .map(|_| {
+                let class = if rand_v08::Rng::gen::<bool>(&mut rng) {
+                    ValueClass::OneWord
+                } else {
+                    ValueClass::TwoWord
+                };
+                let a = sample_ibig(class, &mut rng);
+                let b = sample_ibig(class, &mut rng);
+                let (min, max) = if a <= b { (a, b) } else { (b, a) };
+                let towards = IBig::from(0);
+                let value = sample_ibig(class, &mut rng);
+                (min, max, towards, value)
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(n_nodes),
+            &nodes,
+            |b, nodes| {
+                b.iter(|| {
+                    // Phase 1: clone all nodes (dominates at 13 % of Ir).
+                    let cloned: Vec<_> = nodes
+                        .iter()
+                        .map(|(min, max, towards, value)| {
+                            (min.clone(), max.clone(), towards.clone(), value.clone())
+                        })
+                        .collect();
+
+                    // Phase 2: compute sort_key for each: sub + magnitude.
+                    let sort_keys: Vec<(UBig, bool)> = cloned
+                        .iter()
+                        .map(|(_min, _max, towards, value)| {
+                            let target = towards.clone();
+                            let distance = (black_box(value) - &target).unsigned_abs();
+                            let below = *value < target;
+                            (distance, below)
+                        })
+                        .collect();
+
+                    // Phase 3: lexicographic comparison of sort key sequences.
+                    let mut total_order = std::cmp::Ordering::Equal;
+                    for i in 0..sort_keys.len() {
+                        let cmp = sort_keys[i].cmp(black_box(&sort_keys[sort_keys.len() - 1 - i]));
+                        if cmp != std::cmp::Ordering::Equal {
+                            total_order = cmp;
+                            break;
+                        }
+                    }
+                    (cloned, sort_keys, total_order)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 10. from_index binary search — IntegerChoice::from_index does a binary
+//     search with BigUint arithmetic: mid = lo + ((hi - lo) >> 1), then
+//     min(mid, above) + min(mid, below) comparisons.
+// ---------------------------------------------------------------------------
+
+fn ubig_binary_search_step(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_binary_search_step");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let triples: Vec<(UBig, UBig, UBig)> = (0..32)
+            .map(|_| {
+                let a = sample_ubig(class, &mut rng);
+                let b = sample_ubig(class, &mut rng);
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                let above = sample_ubig(class, &mut rng);
+                (lo, hi, above)
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &triples,
+            |b, t| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (lo, hi, above) = &t[i & 31];
+                    i = i.wrapping_add(1);
+                    let mid = lo + &((hi - lo) >> 1usize);
+                    let total = std::cmp::min(&mid, black_box(above))
+                        + std::cmp::min(&mid, black_box(above));
+                    (mid, total)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    ibig_clone_by_class,
+    choice_node_clone,
+    ibig_drop_by_class,
+    ibig_sub_magnitude,
+    ibig_clamp,
+    ibig_double_cmp,
+    ibig_from_small_consts,
+    ubig_cmp_by_class,
+    ibig_shift_right_descent,
+    shrinker_consider_workload,
+    ubig_binary_search_step,
+);
+
+criterion_main!(benches);
