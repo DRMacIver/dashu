@@ -523,6 +523,26 @@ impl From<&[Word]> for Buffer {
     }
 }
 
+impl Buffer {
+    /// Build a `Buffer` from `slice` with exactly `slice.len() + extra`
+    /// capacity, skipping the 12.5 %-growth slack that
+    /// [`Buffer::from`]/[`Buffer::allocate`] add.
+    ///
+    /// Intended for the by-ref arithmetic dispatch sites (e.g. `&UBig + &UBig`)
+    /// where the maximum extension is known up-front: addition pushes at most
+    /// one carry-out word, magnitude subtraction never grows. Smaller
+    /// allocations also tend to land in a smaller `malloc` size class
+    /// (e.g. on macOS `nano_malloc`: 32-byte slot instead of 48 for the
+    /// 3-word inputs that dominate the hegel-shrinker workload), which is
+    /// a hair faster than the larger one.
+    #[inline]
+    pub(crate) fn from_slice_with_extra(slice: &[Word], extra: usize) -> Self {
+        let mut buffer = Buffer::allocate_exact(slice.len() + extra);
+        buffer.push_slice(slice);
+        buffer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -81,15 +81,23 @@ pub mod repr {
         type Output = Repr;
         #[inline(always)]
         fn add(self, rhs: TypedReprRef) -> Repr {
+            // Build the in-place buffer with exactly `len + 1` capacity
+            // (room for one carry-out word). The default `Buffer::from`
+            // path's 12.5 %-growth slack is wasted here — the addition's
+            // output bound is known.
             match (self, rhs) {
                 (RefSmall(dword0), RefSmall(dword1)) => add_dword(dword0, dword1),
-                (RefSmall(dword0), RefLarge(words1)) => add_large_dword(words1.into(), dword0),
-                (RefLarge(words0), RefSmall(dword1)) => add_large_dword(words0.into(), dword1),
+                (RefSmall(dword0), RefLarge(words1)) => {
+                    add_large_dword(Buffer::from_slice_with_extra(words1, 1), dword0)
+                }
+                (RefLarge(words0), RefSmall(dword1)) => {
+                    add_large_dword(Buffer::from_slice_with_extra(words0, 1), dword1)
+                }
                 (RefLarge(words0), RefLarge(words1)) => {
                     if words0.len() >= words1.len() {
-                        add_large(words0.into(), words1)
+                        add_large(Buffer::from_slice_with_extra(words0, 1), words1)
                     } else {
-                        add_large(words1.into(), words0)
+                        add_large(Buffer::from_slice_with_extra(words1, 1), words0)
                     }
                 }
             }
@@ -103,7 +111,9 @@ pub mod repr {
             match (self, rhs) {
                 (RefSmall(dword0), Small(dword1)) => add_dword(dword0, dword1),
                 (RefSmall(dword0), Large(buffer1)) => add_large_dword(buffer1, dword0),
-                (RefLarge(words0), Small(dword1)) => add_large_dword(words0.into(), dword1),
+                (RefLarge(words0), Small(dword1)) => {
+                    add_large_dword(Buffer::from_slice_with_extra(words0, 1), dword1)
+                }
                 (RefLarge(words0), Large(buffer1)) => add_large(buffer1, words0),
             }
         }
@@ -196,11 +206,18 @@ pub mod repr {
         type Output = Repr;
         #[inline(always)]
         fn sub(self, rhs: TypedReprRef) -> Repr {
+            // Magnitude subtraction never grows the lhs buffer, so allocate
+            // exactly `len` words for the in-place result and skip the
+            // default-capacity slack.
             match (self, rhs) {
                 (RefSmall(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
                 (RefSmall(_), RefLarge(_)) => panic_negative_ubig(),
-                (RefLarge(buffer0), RefSmall(dword1)) => sub_large_dword(buffer0.into(), dword1),
-                (RefLarge(buffer0), RefLarge(buffer1)) => sub_large(buffer0.into(), buffer1),
+                (RefLarge(buffer0), RefSmall(dword1)) => {
+                    sub_large_dword(Buffer::from_slice_with_extra(buffer0, 0), dword1)
+                }
+                (RefLarge(buffer0), RefLarge(buffer1)) => {
+                    sub_large(Buffer::from_slice_with_extra(buffer0, 0), buffer1)
+                }
             }
         }
     }
@@ -225,7 +242,9 @@ pub mod repr {
             match (self, rhs) {
                 (RefSmall(dword0), Small(dword1)) => sub_dword(dword0, dword1),
                 (RefSmall(_), Large(_)) => panic_negative_ubig(),
-                (RefLarge(buffer0), Small(dword1)) => sub_large_dword(buffer0.into(), dword1),
+                (RefLarge(buffer0), Small(dword1)) => {
+                    sub_large_dword(Buffer::from_slice_with_extra(buffer0, 0), dword1)
+                }
                 (RefLarge(buffer0), Large(buffer1)) => sub_large_ref_val(buffer0, buffer1),
             }
         }
@@ -375,17 +394,21 @@ mod repr_signed {
         type Output = Repr;
         #[inline(always)]
         fn sub_signed(self, rhs: TypedReprRef<'r>) -> Repr {
+            // Magnitude subtraction in `sub_in_place_with_sign` never grows
+            // the lhs buffer, so build it with exact `len` capacity.
             match (self, rhs) {
                 (RefSmall(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
                 (RefSmall(dword0), RefLarge(buffer1)) => {
-                    sub_large_dword(buffer1.into(), dword0).neg()
+                    sub_large_dword(Buffer::from_slice_with_extra(buffer1, 0), dword0).neg()
                 }
-                (RefLarge(words0), RefSmall(words1)) => sub_large_dword(words0.into(), words1),
+                (RefLarge(words0), RefSmall(words1)) => {
+                    sub_large_dword(Buffer::from_slice_with_extra(words0, 0), words1)
+                }
                 (RefLarge(words0), RefLarge(words1)) => {
                     if words0.len() >= words1.len() {
-                        sub_large(words0.into(), words1)
+                        sub_large(Buffer::from_slice_with_extra(words0, 0), words1)
                     } else {
-                        sub_large(words1.into(), words0).neg()
+                        sub_large(Buffer::from_slice_with_extra(words1, 0), words0).neg()
                     }
                 }
             }
@@ -399,7 +422,9 @@ mod repr_signed {
             match (self, rhs) {
                 (RefSmall(dword0), Small(dword1)) => sub_dword(dword0, dword1),
                 (RefSmall(dword0), Large(buffer1)) => sub_large_dword(buffer1, dword0).neg(),
-                (RefLarge(words0), Small(dword1)) => sub_large_dword(words0.into(), dword1),
+                (RefLarge(words0), Small(dword1)) => {
+                    sub_large_dword(Buffer::from_slice_with_extra(words0, 0), dword1)
+                }
                 (RefLarge(words0), Large(buffer1)) => sub_large(buffer1, words0).neg(),
             }
         }
@@ -411,7 +436,9 @@ mod repr_signed {
         fn sub_signed(self, rhs: TypedReprRef) -> Self::Output {
             match (self, rhs) {
                 (Small(dword0), RefSmall(dword1)) => sub_dword(dword0, dword1),
-                (Small(dword0), RefLarge(words1)) => sub_large_dword(words1.into(), dword0).neg(),
+                (Small(dword0), RefLarge(words1)) => {
+                    sub_large_dword(Buffer::from_slice_with_extra(words1, 0), dword0).neg()
+                }
                 (Large(buffer0), RefSmall(dword1)) => sub_large_dword(buffer0, dword1),
                 (Large(buffer0), RefLarge(words1)) => sub_large(buffer0, words1),
             }
