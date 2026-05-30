@@ -24,6 +24,7 @@ pub fn cmp_same_len(lhs: &[Word], rhs: &[Word]) -> Ordering {
 /// # Panics
 ///
 /// Panic if lhs or rhs has leading zero words (including the case where lhs == 0 or rhs == 0)
+#[inline]
 pub fn cmp_in_place(lhs: &[Word], rhs: &[Word]) -> Ordering {
     debug_assert!(*lhs.last().unwrap() != 0 && *rhs.last().unwrap() != 0);
     lhs.len()
