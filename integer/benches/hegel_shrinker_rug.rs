@@ -356,6 +356,148 @@ fn ibig_hashmap_keys(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// from_index full binary search — `rug` mirror of `from_index_full_search`.
+// ---------------------------------------------------------------------------
+
+fn from_index_full_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("from_index_full_search");
+
+    let above = Integer::from(i128::MAX as u128);
+    let below = Integer::from(i128::MAX as u128 + 1);
+
+    for target_frac in [0.0f64, 0.25, 0.5, 0.75, 1.0] {
+        let target_idx = {
+            let max_idx = Integer::from(&above + &below);
+            let frac_bits = (target_frac * 1000.0) as u128;
+            Integer::from(&max_idx * Integer::from(frac_bits)) / Integer::from(1000u32)
+        };
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("frac_{:.0}pct", target_frac * 100.0)),
+            &target_idx,
+            |b, idx| {
+                b.iter(|| {
+                    let one = Integer::from(1u32);
+                    let mut lo = one.clone();
+                    let mut hi = std::cmp::max(&above, &below).clone();
+                    while lo < hi {
+                        let mid = Integer::from(&lo + Integer::from(Integer::from(&hi - &lo) >> 1u32));
+                        let total = Integer::from(std::cmp::min(&mid, &above))
+                            + std::cmp::min(&mid, &below);
+                        if Integer::from(total) >= *black_box(idx) {
+                            hi = mid;
+                        } else {
+                            lo = mid + &one;
+                        }
+                    }
+                    lo
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// By-ref add/sub mirrors.
+// ---------------------------------------------------------------------------
+
+fn ubig_ref_add_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_ref_add");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let pairs: Vec<(Integer, Integer)> = (0..32)
+            .map(|_| (sample_rug_uint(class, &mut rng), sample_rug_uint(class, &mut rng)))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    Integer::from(black_box(a) + black_box(c))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn ubig_ref_sub_by_class(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_ref_sub");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord, ValueClass::JustOverInline] {
+        let pairs: Vec<(Integer, Integer)> = (0..32)
+            .map(|_| {
+                let a = sample_rug_uint(class, &mut rng);
+                let b = sample_rug_uint(class, &mut rng);
+                if a >= b { (a, b) } else { (b, a) }
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    Integer::from(black_box(a) - black_box(c))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn ibig_boundary_sort(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    c.bench_function("ibig_boundary_sort", |b| {
+        let min = Integer::from(i128::MIN + 1);
+        let max = Integer::from(i128::MAX);
+
+        b.iter(|| {
+            let mut values = vec![min.clone(), max.clone(), Integer::new()];
+            for sign in [1i128, -1] {
+                for exp in 0..=128u32 {
+                    let v = Integer::from(sign) * Integer::from(1u128 << exp.min(127));
+                    values.push(v);
+                }
+            }
+            values.push(Integer::from(rand_v08::Rng::gen_range(&mut rng, -10i64..10)));
+            values.sort();
+            values.dedup();
+            black_box(values.len())
+        })
+    });
+}
+
+fn ubig_min_inline(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("ubig_min");
+    for &class in &[ValueClass::OneWord, ValueClass::TwoWord] {
+        let pairs: Vec<(Integer, Integer)> = (0..32)
+            .map(|_| (sample_rug_uint(class, &mut rng), sample_rug_uint(class, &mut rng)))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::from_parameter(class.label()),
+            &pairs,
+            |b, p| {
+                let mut i = 0usize;
+                b.iter(|| {
+                    let (a, c) = &p[i & 31];
+                    i = i.wrapping_add(1);
+                    std::cmp::min(black_box(a), black_box(c))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     ibig_clone_by_class,
@@ -370,6 +512,11 @@ criterion_group!(
     shrinker_consider_workload,
     ubig_binary_search_step,
     ibig_hashmap_keys,
+    from_index_full_search,
+    ubig_ref_add_by_class,
+    ubig_ref_sub_by_class,
+    ibig_boundary_sort,
+    ubig_min_inline,
 );
 
 criterion_main!(benches);
